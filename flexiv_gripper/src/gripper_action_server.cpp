@@ -44,33 +44,16 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
     this->future_wait_timeout_ = rclcpp::WallRate(kFeedbackPublishRate).period();
 
     try {
-        RCLCPP_INFO(this->get_logger(), "Connecting to robot %s ...", robot_sn.c_str());
-        robot_ = std::make_unique<flexiv::rdk::Robot>(robot_sn);
+        RCLCPP_INFO(this->get_logger(), "Connecting to robot %s (lite mode) ...", robot_sn.c_str());
+        // Use lite=true for gripper node since it only sends one-shot commands
+        // This allows coexistence with the main hardware interface connection
+        robot_ = std::make_unique<flexiv::rdk::Robot>(robot_sn, std::vector<std::string>{}, true, true);
 
         RCLCPP_INFO(this->get_logger(), "Successfully connected to robot");
 
-        // Clear fault on robot server if any
-        if (robot_->fault()) {
-            RCLCPP_WARN(this->get_logger(), "Fault occurred on robot server, trying to clear ...");
-            // Try to clear the fault
-            if (!robot_->ClearFault()) {
-                RCLCPP_FATAL(get_logger(), "Fault cannot be cleared, exiting ...");
-                throw std::runtime_error("Fault cannot be cleared");
-            }
-            RCLCPP_INFO(this->get_logger(), "Fault on robot server is cleared");
-        }
-
-        // Enable the robot
-        if (!robot_->operational()) {
-            RCLCPP_INFO(this->get_logger(), "Enabling robot ...");
-            robot_->Enable();
-
-            // Wait for the robot to become operational
-            while (!robot_->operational()) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-            RCLCPP_INFO(this->get_logger(), "Robot is now operational");
-        }
+        // Note: With lite=true, we skip fault clearing and robot enabling.
+        // The main hardware interface (ros2_control_node) handles these operations.
+        // A lite instance cannot call operational(), Enable(), or ClearFault().
 
         RCLCPP_INFO(this->get_logger(), "Initializing Flexiv gripper control interface");
         this->gripper_ = std::make_unique<flexiv::rdk::Gripper>(*robot_);
