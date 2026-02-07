@@ -283,6 +283,19 @@ def generate_launch_description():
         condition=UnlessCondition(use_fake_hardware),
     )
 
+    # Run cartesian pose controller (inactive — activated at runtime via switch_controller)
+    cartesian_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "cartesian_pose_controller",
+            "--inactive",
+            "--controller-manager",
+            "/controller_manager",
+        ],
+        parameters=[{"robot_sn": robot_sn}],
+    )
+
     # Delay start of robot_controller after `joint_state_broadcaster`
     delay_robot_controller_spawner_after_joint_state_broadcaster_spawner = (
         RegisterEventHandler(
@@ -309,6 +322,7 @@ def generate_launch_description():
         flexiv_robot_states_broadcaster_spawner,
         load_gripper_launch,
         gpio_controller_spawner,
+        cartesian_controller_spawner,
         delay_robot_controller_spawner_after_joint_state_broadcaster_spawner,
         delay_rviz_after_robot_controller_spawner,
     ]

@@ -14,6 +14,9 @@ controller_manager:
     flexiv_robot_states_broadcaster:
       type: flexiv_robot_states_broadcaster/FlexivRobotStatesBroadcaster
 
+    cartesian_pose_controller:
+      type: cartesian_pose_controller/CartesianPoseController
+
 rizon_arm_controller:
   ros__parameters:
     joints:

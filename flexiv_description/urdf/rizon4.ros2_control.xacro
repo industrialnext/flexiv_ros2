@@ -21,6 +21,11 @@
           <param name="robot_sn">${robot_sn}</param>
           <param name="prefix">${prefix}</param>
           <param name="rdk_control_mode">${rdk_control_mode}</param>
+          <param name="cartesian_send_period_s">0.01</param>
+          <param name="cartesian_max_linear_vel">0.05</param>
+          <param name="cartesian_max_angular_vel">0.20</param>
+          <param name="cartesian_max_linear_acc">0.20</param>
+          <param name="cartesian_max_angular_acc">0.50</param>
         </xacro:unless>
       </hardware>
 
@@ -183,6 +188,24 @@
         <state_interface name="digital_input_15"/>
         <state_interface name="digital_input_16"/>
         <state_interface name="digital_input_17"/>
+      </gpio>
+
+      <!-- Cartesian TCP pose command/state interfaces for NRT_CARTESIAN_MOTION_FORCE -->
+      <gpio name="${prefix}cartesian">
+        <command_interface name="pose_x"/>
+        <command_interface name="pose_y"/>
+        <command_interface name="pose_z"/>
+        <command_interface name="pose_qw"/>
+        <command_interface name="pose_qx"/>
+        <command_interface name="pose_qy"/>
+        <command_interface name="pose_qz"/>
+        <state_interface name="tcp_pose_x"/>
+        <state_interface name="tcp_pose_y"/>
+        <state_interface name="tcp_pose_z"/>
+        <state_interface name="tcp_pose_qw"/>
+        <state_interface name="tcp_pose_qx"/>
+        <state_interface name="tcp_pose_qy"/>
+        <state_interface name="tcp_pose_qz"/>
       </gpio>
 
     </ros2_control>

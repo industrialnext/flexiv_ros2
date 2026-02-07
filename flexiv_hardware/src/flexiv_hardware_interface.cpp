@@ -56,6 +56,25 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
     torque_controller_running_ = false;
     controllers_initialized_ = false;
 
+    // Initialize cartesian arrays
+    hw_commands_cartesian_pose_.fill(std::numeric_limits<double>::quiet_NaN());
+    hw_states_tcp_pose_.fill(0.0);
+    cartesian_send_elapsed_s_ = 0.0;
+
+    // Parse optional cartesian hardware params with safe defaults
+    auto get_param = [&](const std::string& name, double default_val) -> double {
+        auto it = info_.hardware_parameters.find(name);
+        if (it != info_.hardware_parameters.end()) {
+            return std::stod(it->second);
+        }
+        return default_val;
+    };
+    cartesian_send_period_s_ = get_param("cartesian_send_period_s", 0.01);
+    cartesian_max_linear_vel_ = get_param("cartesian_max_linear_vel", 0.05);
+    cartesian_max_angular_vel_ = get_param("cartesian_max_angular_vel", 0.20);
+    cartesian_max_linear_acc_ = get_param("cartesian_max_linear_acc", 0.20);
+    cartesian_max_angular_acc_ = get_param("cartesian_max_angular_acc", 0.50);
+
     if (info_.joints.size() != kJointDoF) {
         RCLCPP_FATAL(getLogger(), "Got %ld joints. Expected %ld.", info_.joints.size(), kJointDoF);
         return hardware_interface::CallbackReturn::ERROR;
@@ -185,6 +204,15 @@ std::vector<hardware_interface::StateInterface> FlexivHardwareInterface::export_
             prefix + "gpio", "digital_input_" + std::to_string(i), &hw_states_gpio_in_[i]));
     }
 
+    // Cartesian TCP pose state interfaces
+    const std::string cart_state_names[] = {
+        "tcp_pose_x", "tcp_pose_y", "tcp_pose_z",
+        "tcp_pose_qw", "tcp_pose_qx", "tcp_pose_qy", "tcp_pose_qz"};
+    for (size_t i = 0; i < kCartPoseSize; i++) {
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            prefix + "cartesian", cart_state_names[i], &hw_states_tcp_pose_[i]));
+    }
+
     return state_interfaces;
 }
 
@@ -207,6 +235,15 @@ FlexivHardwareInterface::export_command_interfaces()
     for (size_t i = 0; i < flexiv::rdk::kIOPorts; i++) {
         command_interfaces.emplace_back(hardware_interface::CommandInterface(
             prefix + "gpio", "digital_output_" + std::to_string(i), &hw_commands_gpio_out_[i]));
+    }
+
+    // Cartesian pose command interfaces
+    const std::string cart_cmd_names[] = {
+        "pose_x", "pose_y", "pose_z",
+        "pose_qw", "pose_qx", "pose_qy", "pose_qz"};
+    for (size_t i = 0; i < kCartPoseSize; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            prefix + "cartesian", cart_cmd_names[i], &hw_commands_cartesian_pose_[i]));
     }
 
     return command_interfaces;
@@ -289,13 +326,19 @@ hardware_interface::return_type FlexivHardwareInterface::read(
         for (size_t i = 0; i < hw_states_gpio_in_.size(); i++) {
             hw_states_gpio_in_[i] = static_cast<double>(gpio_in[i]);
         }
+
+        // Copy TCP pose to cartesian state interfaces
+        const auto& tcp_pose = hw_flexiv_robot_states_.tcp_pose;
+        for (size_t i = 0; i < kCartPoseSize && i < tcp_pose.size(); i++) {
+            hw_states_tcp_pose_[i] = tcp_pose[i];
+        }
     }
 
     return hardware_interface::return_type::OK;
 }
 
 hardware_interface::return_type FlexivHardwareInterface::write(
-    const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
+    const rclcpp::Time& /*time*/, const rclcpp::Duration& period)
 {
     // Initialize target vectors to hold position
     std::vector<double> target_pos(robot_->info().DoF);
@@ -333,6 +376,35 @@ hardware_interface::return_type FlexivHardwareInterface::write(
         robot_->StreamJointTorque(target_torque, true, true);
     }
 
+    // Cartesian motion-force streaming (NRT, rate-limited to ~100Hz)
+    if (cartesian_controller_running_
+        && robot_->mode() == flexiv::rdk::Mode::NRT_CARTESIAN_MOTION_FORCE) {
+        bool isNanCart = false;
+        for (size_t i = 0; i < kCartPoseSize; i++) {
+            if (std::isnan(hw_commands_cartesian_pose_[i])) {
+                isNanCart = true;
+                break;
+            }
+        }
+        if (!isNanCart) {
+            cartesian_send_elapsed_s_ += period.seconds();
+            if (cartesian_send_elapsed_s_ >= cartesian_send_period_s_) {
+                cartesian_send_elapsed_s_ = 0.0;
+                std::array<double, kCartPoseSize> target;
+                std::copy(hw_commands_cartesian_pose_.begin(),
+                          hw_commands_cartesian_pose_.end(), target.begin());
+                robot_->SendCartesianMotionForce(
+                    target,
+                    {},
+                    {},
+                    cartesian_max_linear_vel_,
+                    cartesian_max_angular_vel_,
+                    cartesian_max_linear_acc_,
+                    cartesian_max_angular_acc_);
+            }
+        }
+    }
+
     // Write digital output
     std::map<unsigned int, bool> digital_outputs;
     for (size_t i = 0; i < hw_commands_gpio_out_.size(); i++) {
@@ -368,6 +440,8 @@ hardware_interface::return_type FlexivHardwareInterface::prepare_command_mode_sw
 {
     start_modes_.clear();
     stop_modes_.clear();
+    cartesian_start_requested_ = false;
+    cartesian_stop_requested_ = false;
 
     // Starting interfaces
     for (const auto& key : start_interfaces) {
@@ -383,14 +457,41 @@ hardware_interface::return_type FlexivHardwareInterface::prepare_command_mode_sw
             }
         }
     }
-    // All joints must be given new command mode at the same time
-    if (start_modes_.size() != 0 && start_modes_.size() != info_.joints.size()) {
-        return hardware_interface::return_type::ERROR;
+
+    // Detect cartesian start interfaces
+    size_t cartesian_start_count = 0;
+    for (const auto& key : start_interfaces) {
+        if (key.find("cartesian/pose_") != std::string::npos) {
+            cartesian_start_count++;
+        }
     }
-    // All joints must have the same command mode
-    if (start_modes_.size() != 0
-        && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin())) {
-        return hardware_interface::return_type::ERROR;
+    if (cartesian_start_count > 0) {
+        if (cartesian_start_count != kCartPoseSize) {
+            RCLCPP_ERROR(getLogger(),
+                "Cartesian start requires all %zu interfaces, got %zu",
+                kCartPoseSize, cartesian_start_count);
+            return hardware_interface::return_type::ERROR;
+        }
+        // Reject mixed mode (joint + cartesian simultaneously)
+        if (start_modes_.size() > 0) {
+            RCLCPP_ERROR(getLogger(),
+                "Cannot start joint and cartesian interfaces simultaneously");
+            return hardware_interface::return_type::ERROR;
+        }
+        cartesian_start_requested_ = true;
+    }
+
+    // All joints must be given new command mode at the same time
+    // (skip this check when only cartesian interfaces are being started)
+    if (!cartesian_start_requested_) {
+        if (start_modes_.size() != 0 && start_modes_.size() != info_.joints.size()) {
+            return hardware_interface::return_type::ERROR;
+        }
+        // All joints must have the same command mode
+        if (start_modes_.size() != 0
+            && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin())) {
+            return hardware_interface::return_type::ERROR;
+        }
     }
 
     // Stop motion on all relevant joints that are stopping
@@ -407,11 +508,31 @@ hardware_interface::return_type FlexivHardwareInterface::prepare_command_mode_sw
             }
         }
     }
+
+    // Detect cartesian stop interfaces
+    size_t cartesian_stop_count = 0;
+    for (const auto& key : stop_interfaces) {
+        if (key.find("cartesian/pose_") != std::string::npos) {
+            cartesian_stop_count++;
+        }
+    }
+    if (cartesian_stop_count > 0) {
+        if (cartesian_stop_count != kCartPoseSize) {
+            RCLCPP_ERROR(getLogger(),
+                "Cartesian stop requires all %zu interfaces, got %zu",
+                kCartPoseSize, cartesian_stop_count);
+            return hardware_interface::return_type::ERROR;
+        }
+        cartesian_stop_requested_ = true;
+    }
+
     // stop all interfaces at the same time
-    if (stop_modes_.size() != 0
-        && (stop_modes_.size() != info_.joints.size()
-            || !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin()))) {
-        return hardware_interface::return_type::ERROR;
+    if (!cartesian_stop_requested_) {
+        if (stop_modes_.size() != 0
+            && (stop_modes_.size() != info_.joints.size()
+                || !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin()))) {
+            return hardware_interface::return_type::ERROR;
+        }
     }
 
     controllers_initialized_ = true;
@@ -422,6 +543,12 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
     const std::vector<std::string>& /*start_interfaces*/,
     const std::vector<std::string>& /*stop_interfaces*/)
 {
+    // STOP cartesian
+    if (cartesian_stop_requested_) {
+        cartesian_controller_running_ = false;
+        robot_->Stop();
+    }
+
     if (stop_modes_.size() != 0
         && std::find(stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_POSITION)
                != stop_modes_.end()) {
@@ -487,8 +614,22 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
         torque_controller_running_ = true;
     }
 
+    // START cartesian
+    if (cartesian_start_requested_) {
+        position_controller_running_ = false;
+        velocity_controller_running_ = false;
+        torque_controller_running_ = false;
+        hw_commands_cartesian_pose_.fill(std::numeric_limits<double>::quiet_NaN());
+        cartesian_send_elapsed_s_ = 0.0;
+        robot_->SwitchMode(flexiv::rdk::Mode::NRT_CARTESIAN_MOTION_FORCE);
+        robot_->SetForceControlAxis({false, false, false, false, false, false});
+        cartesian_controller_running_ = true;
+    }
+
     start_modes_.clear();
     stop_modes_.clear();
+    cartesian_start_requested_ = false;
+    cartesian_stop_requested_ = false;
 
     return hardware_interface::return_type::OK;
 }

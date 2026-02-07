@@ -9,6 +9,8 @@
 #ifndef FLEXIV_HARDWARE__FLEXIV_HARDWARE_INTERFACE_HPP_
 #define FLEXIV_HARDWARE__FLEXIV_HARDWARE_INTERFACE_HPP_
 
+#include <array>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -122,6 +124,26 @@ private:
     bool position_controller_running_;
     bool velocity_controller_running_;
     bool torque_controller_running_;
+
+    // Cartesian streaming
+    static constexpr size_t kCartPoseSize = 7;  // x,y,z,qw,qx,qy,qz
+    std::array<double, kCartPoseSize> hw_commands_cartesian_pose_;
+    std::array<double, kCartPoseSize> hw_states_tcp_pose_;
+    bool cartesian_controller_running_ = false;
+
+    // Send-rate limiting (prefer period-based timing over fixed "skip N cycles")
+    double cartesian_send_period_s_ = 0.01;  // 100 Hz
+    double cartesian_send_elapsed_s_ = 0.0;
+
+    // Conservative safety limits for teleop (configurable via hardware params)
+    double cartesian_max_linear_vel_ = 0.05;   // m/s
+    double cartesian_max_angular_vel_ = 0.20;  // rad/s
+    double cartesian_max_linear_acc_ = 0.20;   // m/s^2
+    double cartesian_max_angular_acc_ = 0.50;  // rad/s^2
+
+    // Mode-switch bookkeeping (separate from per-joint start/stop bookkeeping)
+    bool cartesian_start_requested_ = false;
+    bool cartesian_stop_requested_ = false;
 };
 
 } /* namespace flexiv_hardware */
