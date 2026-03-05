@@ -422,22 +422,37 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
     const std::vector<std::string>& /*start_interfaces*/,
     const std::vector<std::string>& /*stop_interfaces*/)
 {
+    bool starting_new_mode = (start_modes_.size() != 0);
+
+    // Mark the old mode as stopped. Only call robot_->Stop() if we
+    // are NOT immediately switching to another mode. SwitchMode()
+    // auto-stops internally ("If the robot is still moving when this
+    // function is called, it will automatically stop before making
+    // the mode transition" — Flexiv RDK docs). Calling Stop() first
+    // adds an extra blocking wait that starves the RT command stream
+    // and triggers timeliness warnings.
     if (stop_modes_.size() != 0
         && std::find(stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_POSITION)
                != stop_modes_.end()) {
         position_controller_running_ = false;
-        robot_->Stop();
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
     } else if (stop_modes_.size() != 0
                && std::find(
                       stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_VELOCITY)
                       != stop_modes_.end()) {
         velocity_controller_running_ = false;
-        robot_->Stop();
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
     } else if (stop_modes_.size() != 0
                && std::find(stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_EFFORT)
                       != stop_modes_.end()) {
         torque_controller_running_ = false;
-        robot_->Stop();
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
     }
 
     if (start_modes_.size() != 0
