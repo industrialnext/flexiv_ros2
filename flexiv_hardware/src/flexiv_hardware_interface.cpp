@@ -152,6 +152,11 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    // Raise the RT timeliness failure limit so that blocking mode
+    // switches (Stop + SwitchMode) don't trip the default threshold
+    // of 3 failures within 60 seconds.
+    robot_->SetTimelinessFailureLimit(20);
+
     RCLCPP_INFO(getLogger(), "Successfully connected to robot");
     return hardware_interface::CallbackReturn::SUCCESS;
 }
