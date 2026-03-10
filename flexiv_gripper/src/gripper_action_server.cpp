@@ -11,6 +11,7 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
 {
     this->declare_parameter("robot_sn", std::string());
     this->declare_parameter("gripper_name", std::string());
+    this->declare_parameter("lite", true);
     this->declare_parameter("state_publish_rate", kDefaultStatePublishRate);
     this->declare_parameter("feedback_publish_rate", kDefaultFeedbackPublishRate);
     this->declare_parameter("default_velocity", kDefaultVelocity);
@@ -43,33 +44,41 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
         = static_cast<double>(this->get_parameter("feedback_publish_rate").as_int());
     this->future_wait_timeout_ = rclcpp::WallRate(kFeedbackPublishRate).period();
 
+    const bool use_lite = this->get_parameter("lite").as_bool();
+
     try {
-        RCLCPP_INFO(this->get_logger(), "Connecting to robot %s ...", robot_sn.c_str());
-        robot_ = std::make_unique<flexiv::rdk::Robot>(robot_sn);
+        RCLCPP_INFO(this->get_logger(), "Connecting to robot %s (lite=%s) ...", robot_sn.c_str(),
+            use_lite ? "true" : "false");
+        robot_ = std::make_unique<flexiv::rdk::Robot>(robot_sn, std::vector<std::string>{},
+            /* verbose */ true, /* lite */ use_lite);
 
         RCLCPP_INFO(this->get_logger(), "Successfully connected to robot");
 
-        // Clear fault on robot server if any
-        if (robot_->fault()) {
-            RCLCPP_WARN(this->get_logger(), "Fault occurred on robot server, trying to clear ...");
-            // Try to clear the fault
-            if (!robot_->ClearFault()) {
-                RCLCPP_FATAL(get_logger(), "Fault cannot be cleared, exiting ...");
-                throw std::runtime_error("Fault cannot be cleared");
+        // Fault clearing and robot enabling are only available on non-lite instances
+        if (!use_lite) {
+            // Clear fault on robot server if any
+            if (robot_->fault()) {
+                RCLCPP_WARN(
+                    this->get_logger(), "Fault occurred on robot server, trying to clear ...");
+                // Try to clear the fault
+                if (!robot_->ClearFault()) {
+                    RCLCPP_FATAL(get_logger(), "Fault cannot be cleared, exiting ...");
+                    throw std::runtime_error("Fault cannot be cleared");
+                }
+                RCLCPP_INFO(this->get_logger(), "Fault on robot server is cleared");
             }
-            RCLCPP_INFO(this->get_logger(), "Fault on robot server is cleared");
-        }
 
-        // Enable the robot
-        if (!robot_->operational()) {
-            RCLCPP_INFO(this->get_logger(), "Enabling robot ...");
-            robot_->Enable();
+            // Enable the robot
+            if (!robot_->operational()) {
+                RCLCPP_INFO(this->get_logger(), "Enabling robot ...");
+                robot_->Enable();
 
-            // Wait for the robot to become operational
-            while (!robot_->operational()) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                // Wait for the robot to become operational
+                while (!robot_->operational()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                RCLCPP_INFO(this->get_logger(), "Robot is now operational");
             }
-            RCLCPP_INFO(this->get_logger(), "Robot is now operational");
         }
 
         RCLCPP_INFO(this->get_logger(), "Initializing Flexiv gripper control interface");

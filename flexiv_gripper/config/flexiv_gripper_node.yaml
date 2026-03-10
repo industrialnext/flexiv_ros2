@@ -1,5 +1,6 @@
 flexiv_gripper:
   ros__parameters:
+    lite: true # Use lite RDK instance (required when ros2_control_node holds the full connection)
     state_publish_rate: 50 # Hz
     feedback_publish_rate: 30 # Hz
     default_velocity: 0.1 # m/s
