@@ -12,6 +12,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     robot_sn_param_name = "robot_sn"
     gripper_name_param_name = "gripper_name"
+    tool_name_param_name = "tool_name"
     use_fake_hardware_param_name = "use_fake_hardware"
     gripper_joint_names_param_name = "gripper_joint_names"
 
@@ -28,8 +29,19 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             gripper_name_param_name,
-            description="Full name of the gripper to be controlled, can be found in Flexiv Elements -> Settings -> Device",
+            description="Gripper hardware device name (Flexiv Elements > Settings > Device). "
+            "Used for gripper_->Enable() to control the physical gripper.",
             default_value="Flexiv-GN01",
+        )
+    )
+
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            tool_name_param_name,
+            description="Tool profile name on the control box for gravity compensation "
+            "(mass/CoM/inertia/TCP). Defaults to gripper_name if empty. Set to a custom "
+            "profile (e.g. 'GPU-Gripper') when additional payload changes the tool mass.",
+            default_value="",
         )
     )
 
@@ -52,6 +64,7 @@ def generate_launch_description():
     # Initialize arguments
     robot_sn = LaunchConfiguration(robot_sn_param_name)
     gripper_name = LaunchConfiguration(gripper_name_param_name)
+    tool_name = LaunchConfiguration(tool_name_param_name)
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_param_name)
     gripper_joint_names = LaunchConfiguration(gripper_joint_names_param_name)
 
@@ -68,6 +81,7 @@ def generate_launch_description():
             {
                 "robot_sn": robot_sn,
                 "gripper_name": gripper_name,
+                "tool_name": tool_name,
                 "gripper_joint_names": gripper_joint_names,
             },
             gripper_config_file,
