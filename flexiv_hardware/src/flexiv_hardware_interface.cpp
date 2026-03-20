@@ -125,6 +125,15 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    // Tool profile name for gravity compensation (mass/CoM/inertia/TCP).
+    // If non-empty, Tool::Switch() will be called during on_activate() while
+    // the robot is still in IDLE mode. This allows setting the correct tool
+    // profile independently of the gripper node.
+    auto tool_name_it = info_.hardware_parameters.find("tool_name");
+    if (tool_name_it != info_.hardware_parameters.end()) {
+        tool_name_ = tool_name_it->second;
+    }
+
     try {
         auto rdk_control_mode_str = info_.hardware_parameters.at("rdk_control_mode");
         if (rdk_control_mode_str == "joint_position") {
@@ -252,6 +261,26 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_activate(
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         RCLCPP_INFO(getLogger(), "Robot is now operational");
+
+        // Switch tool profile for gravity compensation if configured.
+        // Must happen while the robot is in IDLE mode (after Enable, before
+        // SwitchMode), so we do it here before any controller starts.
+        if (!tool_name_.empty()) {
+            RCLCPP_INFO(
+                getLogger(), "Switching robot tool to '%s' ...", tool_name_.c_str());
+            auto tool = std::make_unique<flexiv::rdk::Tool>(*robot_);
+            tool->Switch(tool_name_);
+
+            auto tp = tool->params();
+            RCLCPP_INFO(getLogger(),
+                "Active tool '%s': mass=%.3f kg, CoM=[%.4f, %.4f, %.4f] m, "
+                "TCP=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+                tool_name_.c_str(), tp.mass,
+                tp.CoM[0], tp.CoM[1], tp.CoM[2],
+                tp.tcp_location[0], tp.tcp_location[1], tp.tcp_location[2],
+                tp.tcp_location[3], tp.tcp_location[4], tp.tcp_location[5],
+                tp.tcp_location[6]);
+        }
     } catch (const std::exception& e) {
         RCLCPP_FATAL(getLogger(), "Could not enable robot.");
         RCLCPP_FATAL(getLogger(), e.what());
