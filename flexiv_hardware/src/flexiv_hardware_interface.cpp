@@ -125,6 +125,15 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    // Tool profile name for gravity compensation (mass/CoM/inertia/TCP).
+    // If non-empty, Tool::Switch() will be called during on_activate() while
+    // the robot is still in IDLE mode. This allows setting the correct tool
+    // profile independently of the gripper node.
+    auto tool_name_it = info_.hardware_parameters.find("tool_name");
+    if (tool_name_it != info_.hardware_parameters.end()) {
+        tool_name_ = tool_name_it->second;
+    }
+
     try {
         auto rdk_control_mode_str = info_.hardware_parameters.at("rdk_control_mode");
         if (rdk_control_mode_str == "joint_position") {
@@ -151,6 +160,11 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
         RCLCPP_FATAL(getLogger(), e.what());
         return hardware_interface::CallbackReturn::ERROR;
     }
+
+    // Raise the RT timeliness failure limit so that blocking mode
+    // switches (Stop + SwitchMode) don't trip the default threshold
+    // of 3 failures within 60 seconds.
+    robot_->SetTimelinessFailureLimit(20);
 
     RCLCPP_INFO(getLogger(), "Successfully connected to robot");
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -247,6 +261,26 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_activate(
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         RCLCPP_INFO(getLogger(), "Robot is now operational");
+
+        // Switch tool profile for gravity compensation if configured.
+        // Must happen while the robot is in IDLE mode (after Enable, before
+        // SwitchMode), so we do it here before any controller starts.
+        if (!tool_name_.empty()) {
+            RCLCPP_INFO(
+                getLogger(), "Switching robot tool to '%s' ...", tool_name_.c_str());
+            auto tool = std::make_unique<flexiv::rdk::Tool>(*robot_);
+            tool->Switch(tool_name_);
+
+            auto tp = tool->params();
+            RCLCPP_INFO(getLogger(),
+                "Active tool '%s': mass=%.3f kg, CoM=[%.4f, %.4f, %.4f] m, "
+                "TCP=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+                tool_name_.c_str(), tp.mass,
+                tp.CoM[0], tp.CoM[1], tp.CoM[2],
+                tp.tcp_location[0], tp.tcp_location[1], tp.tcp_location[2],
+                tp.tcp_location[3], tp.tcp_location[4], tp.tcp_location[5],
+                tp.tcp_location[6]);
+        }
     } catch (const std::exception& e) {
         RCLCPP_FATAL(getLogger(), "Could not enable robot.");
         RCLCPP_FATAL(getLogger(), e.what());
@@ -422,22 +456,37 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
     const std::vector<std::string>& /*start_interfaces*/,
     const std::vector<std::string>& /*stop_interfaces*/)
 {
+    bool starting_new_mode = (start_modes_.size() != 0);
+
+    // Mark the old mode as stopped. Only call robot_->Stop() if we
+    // are NOT immediately switching to another mode. SwitchMode()
+    // auto-stops internally ("If the robot is still moving when this
+    // function is called, it will automatically stop before making
+    // the mode transition" — Flexiv RDK docs). Calling Stop() first
+    // adds an extra blocking wait that starves the RT command stream
+    // and triggers timeliness warnings.
     if (stop_modes_.size() != 0
         && std::find(stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_POSITION)
                != stop_modes_.end()) {
         position_controller_running_ = false;
-        robot_->Stop();
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
     } else if (stop_modes_.size() != 0
                && std::find(
                       stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_VELOCITY)
                       != stop_modes_.end()) {
         velocity_controller_running_ = false;
-        robot_->Stop();
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
     } else if (stop_modes_.size() != 0
                && std::find(stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_EFFORT)
                       != stop_modes_.end()) {
         torque_controller_running_ = false;
-        robot_->Stop();
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
     }
 
     if (start_modes_.size() != 0

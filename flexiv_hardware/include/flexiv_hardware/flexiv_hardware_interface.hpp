@@ -30,6 +30,7 @@
 
 // Flexiv
 #include "flexiv/rdk/robot.hpp"
+#include "flexiv/rdk/tool.hpp"
 
 namespace flexiv_hardware {
 
@@ -88,6 +89,9 @@ public:
 private:
     // Flexiv RDK
     std::unique_ptr<flexiv::rdk::Robot> robot_;
+
+    // Tool profile name for gravity compensation. Empty = no switch.
+    std::string tool_name_;
 
     // RDK control mode for joint position and velocity interfaces
     flexiv::rdk::Mode rdk_control_mode_;

@@ -11,6 +11,8 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
 {
     this->declare_parameter("robot_sn", std::string());
     this->declare_parameter("gripper_name", std::string());
+    this->declare_parameter("tool_name", std::string());
+    this->declare_parameter("lite", true);
     this->declare_parameter("state_publish_rate", kDefaultStatePublishRate);
     this->declare_parameter("feedback_publish_rate", kDefaultFeedbackPublishRate);
     this->declare_parameter("default_velocity", kDefaultVelocity);
@@ -29,6 +31,16 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
         throw std::invalid_argument("Parameter 'gripper_name' is not set");
     }
 
+    // Tool profile name for gravity compensation (mass/CoM/inertia/TCP).
+    // Defaults to gripper_name if not explicitly set, but can differ when
+    // the same physical gripper hardware has a custom payload profile
+    // (e.g. "GPU-Gripper" with different mass than the stock "Flexiv-GN01").
+    std::string tool_name;
+    this->get_parameter("tool_name", tool_name);
+    if (tool_name.empty()) {
+        tool_name = gripper_name;
+    }
+
     this->default_velocity_ = this->get_parameter("default_velocity").as_double();
     this->default_max_force_ = this->get_parameter("default_max_force").as_double();
 
@@ -43,33 +55,41 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
         = static_cast<double>(this->get_parameter("feedback_publish_rate").as_int());
     this->future_wait_timeout_ = rclcpp::WallRate(kFeedbackPublishRate).period();
 
+    const bool use_lite = this->get_parameter("lite").as_bool();
+
     try {
-        RCLCPP_INFO(this->get_logger(), "Connecting to robot %s ...", robot_sn.c_str());
-        robot_ = std::make_unique<flexiv::rdk::Robot>(robot_sn);
+        RCLCPP_INFO(this->get_logger(), "Connecting to robot %s (lite=%s) ...", robot_sn.c_str(),
+            use_lite ? "true" : "false");
+        robot_ = std::make_unique<flexiv::rdk::Robot>(robot_sn, std::vector<std::string>{},
+            /* verbose */ true, /* lite */ use_lite);
 
         RCLCPP_INFO(this->get_logger(), "Successfully connected to robot");
 
-        // Clear fault on robot server if any
-        if (robot_->fault()) {
-            RCLCPP_WARN(this->get_logger(), "Fault occurred on robot server, trying to clear ...");
-            // Try to clear the fault
-            if (!robot_->ClearFault()) {
-                RCLCPP_FATAL(get_logger(), "Fault cannot be cleared, exiting ...");
-                throw std::runtime_error("Fault cannot be cleared");
+        // Fault clearing and robot enabling are only available on non-lite instances
+        if (!use_lite) {
+            // Clear fault on robot server if any
+            if (robot_->fault()) {
+                RCLCPP_WARN(
+                    this->get_logger(), "Fault occurred on robot server, trying to clear ...");
+                // Try to clear the fault
+                if (!robot_->ClearFault()) {
+                    RCLCPP_FATAL(get_logger(), "Fault cannot be cleared, exiting ...");
+                    throw std::runtime_error("Fault cannot be cleared");
+                }
+                RCLCPP_INFO(this->get_logger(), "Fault on robot server is cleared");
             }
-            RCLCPP_INFO(this->get_logger(), "Fault on robot server is cleared");
-        }
 
-        // Enable the robot
-        if (!robot_->operational()) {
-            RCLCPP_INFO(this->get_logger(), "Enabling robot ...");
-            robot_->Enable();
+            // Enable the robot
+            if (!robot_->operational()) {
+                RCLCPP_INFO(this->get_logger(), "Enabling robot ...");
+                robot_->Enable();
 
-            // Wait for the robot to become operational
-            while (!robot_->operational()) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                // Wait for the robot to become operational
+                while (!robot_->operational()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                RCLCPP_INFO(this->get_logger(), "Robot is now operational");
             }
-            RCLCPP_INFO(this->get_logger(), "Robot is now operational");
         }
 
         RCLCPP_INFO(this->get_logger(), "Initializing Flexiv gripper control interface");
@@ -80,9 +100,29 @@ GripperActionServer::GripperActionServer(const rclcpp::NodeOptions& options)
         RCLCPP_INFO(this->get_logger(), "Enabling gripper %s ...", gripper_name.c_str());
         gripper_->Enable(gripper_name);
 
-        // Switch robot tool to gripper so the gravity compensation and TCP location is updated
-        RCLCPP_INFO(this->get_logger(), "Switching robot tool to %s ...", gripper_name.c_str());
-        tool_->Switch(gripper_name);
+        // Switch robot tool profile for gravity compensation (mass/CoM/inertia/TCP).
+        // This may differ from the gripper device name when a custom payload
+        // profile exists (e.g. "GPU-Gripper" vs hardware device "Flexiv-GN01").
+        RCLCPP_INFO(this->get_logger(), "Switching robot tool to %s ...", tool_name.c_str());
+        tool_->Switch(tool_name);
+
+        // Log the active tool parameters so we can verify gravity compensation
+        // is using the correct mass/CoM. If the arm falls or floats during
+        // gravity comp, these values need to be re-calibrated on the control box
+        // (Flexiv Elements or Tool::CalibratePayloadParams).
+        {
+            auto tp = tool_->params();
+            RCLCPP_INFO(this->get_logger(),
+                "Active tool '%s': mass=%.3f kg, CoM=[%.4f, %.4f, %.4f] m, "
+                "inertia=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f] kg*m^2, "
+                "TCP=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+                tool_name.c_str(), tp.mass,
+                tp.CoM[0], tp.CoM[1], tp.CoM[2],
+                tp.inertia[0], tp.inertia[1], tp.inertia[2],
+                tp.inertia[3], tp.inertia[4], tp.inertia[5],
+                tp.tcp_location[0], tp.tcp_location[1], tp.tcp_location[2],
+                tp.tcp_location[3], tp.tcp_location[4], tp.tcp_location[5], tp.tcp_location[6]);
+        }
 
         // Manually initialize the gripper, not all grippers need this step
         RCLCPP_INFO(
