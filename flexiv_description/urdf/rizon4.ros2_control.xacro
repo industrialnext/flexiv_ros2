@@ -146,6 +146,40 @@
         <state_interface name="effort"/>
       </joint>
 
+      <!-- Cartesian command/state interfaces for RT_CARTESIAN_MOTION_FORCE -->
+      <gpio name="tcp">
+        <command_interface name="pose_x"/><command_interface name="pose_y"/>
+        <command_interface name="pose_z"/><command_interface name="pose_qw"/>
+        <command_interface name="pose_qx"/><command_interface name="pose_qy"/>
+        <command_interface name="pose_qz"/>
+        <command_interface name="wrench_fx"/><command_interface name="wrench_fy"/>
+        <command_interface name="wrench_fz"/><command_interface name="wrench_mx"/>
+        <command_interface name="wrench_my"/><command_interface name="wrench_mz"/>
+        <command_interface name="stiffness_x"/><command_interface name="stiffness_y"/>
+        <command_interface name="stiffness_z"/><command_interface name="stiffness_rx"/>
+        <command_interface name="stiffness_ry"/><command_interface name="stiffness_rz"/>
+        <command_interface name="damping_ratio_x"/><command_interface name="damping_ratio_y"/>
+        <command_interface name="damping_ratio_z"/><command_interface name="damping_ratio_rx"/>
+        <command_interface name="damping_ratio_ry"/><command_interface name="damping_ratio_rz"/>
+        <command_interface name="max_wrench_fx"/><command_interface name="max_wrench_fy"/>
+        <command_interface name="max_wrench_fz"/><command_interface name="max_wrench_mx"/>
+        <command_interface name="max_wrench_my"/><command_interface name="max_wrench_mz"/>
+        <command_interface name="force_ctrl_x"/><command_interface name="force_ctrl_y"/>
+        <command_interface name="force_ctrl_z"/><command_interface name="force_ctrl_rx"/>
+        <command_interface name="force_ctrl_ry"/><command_interface name="force_ctrl_rz"/>
+        <command_interface name="nullspace_q1"/><command_interface name="nullspace_q2"/>
+        <command_interface name="nullspace_q3"/><command_interface name="nullspace_q4"/>
+        <command_interface name="nullspace_q5"/><command_interface name="nullspace_q6"/>
+        <command_interface name="nullspace_q7"/>
+        <state_interface name="state_pose_x"/><state_interface name="state_pose_y"/>
+        <state_interface name="state_pose_z"/><state_interface name="state_pose_qw"/>
+        <state_interface name="state_pose_qx"/><state_interface name="state_pose_qy"/>
+        <state_interface name="state_pose_qz"/>
+        <state_interface name="K_x_nom_x"/><state_interface name="K_x_nom_y"/>
+        <state_interface name="K_x_nom_z"/><state_interface name="K_x_nom_rx"/>
+        <state_interface name="K_x_nom_ry"/><state_interface name="K_x_nom_rz"/>
+      </gpio>
+
       <!-- 18 digital IO ports (16 on control box + 2 inside the wrist connector) -->
       <gpio name="${prefix}gpio">
         <command_interface name="digital_output_0"/>
