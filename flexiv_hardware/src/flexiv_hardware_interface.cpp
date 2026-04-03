@@ -589,7 +589,8 @@ hardware_interface::return_type FlexivHardwareInterface::write(
                     double k_max = hw_state_cart_K_x_nom_[i];
                     double k_cmd = hw_cmd_cart_stiffness_[i];
                     if (k_cmd > k_max) {
-                        RCLCPP_WARN_THROTTLE(getLogger(), rclcpp::Clock(), 2000,
+                        static rclcpp::Clock steady_clock(RCL_STEADY_TIME);
+                        RCLCPP_WARN_THROTTLE(getLogger(), steady_clock, 2000,
                             "Cartesian stiffness axis %zu: %.1f clamped to K_x_nom %.1f",
                             i, k_cmd, k_max);
                         k_cmd = k_max;
