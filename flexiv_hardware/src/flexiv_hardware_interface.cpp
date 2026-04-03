@@ -747,52 +747,85 @@ hardware_interface::return_type FlexivHardwareInterface::prepare_command_mode_sw
         stop_modes_.push_back(StoppingInterface::STOP_CARTESIAN);
     }
 
-    // Starting joint interfaces
+    // Starting joint interfaces.
+    // Controllers may claim multiple interface types for mutual exclusion
+    // (e.g. CartesianController claims effort+position so that position-based
+    // controllers can't run simultaneously). We determine the primary mode
+    // by counting which type has the most claims — the primary mode is the
+    // one that covers all joints, the rest are exclusion locks.
     if (!starting_cartesian) {
+        size_t n_pos = 0, n_vel = 0, n_eff = 0;
         for (const auto& key : start_interfaces) {
             for (std::size_t i = 0; i < info_.joints.size(); i++) {
                 if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) {
-                    start_modes_.push_back(hardware_interface::HW_IF_POSITION);
+                    n_pos++;
                 }
                 if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) {
-                    start_modes_.push_back(hardware_interface::HW_IF_VELOCITY);
+                    n_vel++;
                 }
                 if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
-                    start_modes_.push_back(hardware_interface::HW_IF_EFFORT);
+                    n_eff++;
                 }
             }
         }
-        // All joints must be given new command mode at the same time
-        if (start_modes_.size() != 0 && start_modes_.size() != info_.joints.size()) {
-            return hardware_interface::return_type::ERROR;
+
+        // Determine primary mode: the interface type that has all joints claimed.
+        // When a controller claims multiple types (e.g. effort+position), we pick
+        // effort > position > velocity as the primary mode to use with the RDK,
+        // since effort-based controllers need RT_JOINT_TORQUE while position-based
+        // need NRT_JOINT_POSITION/IMPEDANCE.
+        std::string primary_mode;
+        if (n_eff == info_.joints.size()) {
+            primary_mode = hardware_interface::HW_IF_EFFORT;
+        } else if (n_pos == info_.joints.size()) {
+            primary_mode = hardware_interface::HW_IF_POSITION;
+        } else if (n_vel == info_.joints.size()) {
+            primary_mode = hardware_interface::HW_IF_VELOCITY;
         }
-        // All joints must have the same command mode
-        if (start_modes_.size() != 0
-            && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin())) {
+
+        if (!primary_mode.empty()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++) {
+                start_modes_.push_back(primary_mode);
+            }
+        } else if (n_pos > 0 || n_vel > 0 || n_eff > 0) {
+            // Some joints have interfaces but no single type covers all joints
+            RCLCPP_ERROR(getLogger(),
+                "Not all joints have the same command interface type "
+                "(pos=%zu, vel=%zu, eff=%zu, expected %zu)",
+                n_pos, n_vel, n_eff, info_.joints.size());
             return hardware_interface::return_type::ERROR;
         }
     }
 
-    // Stop motion on all relevant joints that are stopping
+    // Stop motion on all relevant joints that are stopping.
+    // Same logic as start: determine primary mode from the stop list,
+    // ignoring exclusion-lock interfaces.
     if (!stopping_cartesian) {
+        size_t n_pos = 0, n_vel = 0, n_eff = 0;
         for (const auto& key : stop_interfaces) {
             for (std::size_t i = 0; i < info_.joints.size(); i++) {
                 if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) {
-                    stop_modes_.push_back(StoppingInterface::STOP_POSITION);
+                    n_pos++;
                 }
                 if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) {
-                    stop_modes_.push_back(StoppingInterface::STOP_VELOCITY);
+                    n_vel++;
                 }
                 if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
-                    stop_modes_.push_back(StoppingInterface::STOP_EFFORT);
+                    n_eff++;
                 }
             }
         }
-        // stop all interfaces at the same time
-        if (stop_modes_.size() != 0
-            && (stop_modes_.size() != info_.joints.size()
-                || !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin()))) {
-            return hardware_interface::return_type::ERROR;
+
+        // Determine which mode to stop (effort > position > velocity)
+        if (n_eff == info_.joints.size()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++)
+                stop_modes_.push_back(StoppingInterface::STOP_EFFORT);
+        } else if (n_pos == info_.joints.size()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++)
+                stop_modes_.push_back(StoppingInterface::STOP_POSITION);
+        } else if (n_vel == info_.joints.size()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++)
+                stop_modes_.push_back(StoppingInterface::STOP_VELOCITY);
         }
     }
 
