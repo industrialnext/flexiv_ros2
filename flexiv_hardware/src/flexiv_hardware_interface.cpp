@@ -734,21 +734,12 @@ hardware_interface::return_type FlexivHardwareInterface::prepare_command_mode_sw
         }
     }
 
-    // If starting Cartesian mode, don't allow joint modes simultaneously
+    // If starting Cartesian mode, treat this as a Cartesian-only switch.
+    // The FlexivCartesianController also claims joint effort+position
+    // interfaces as an exclusion lock (so no other controller can activate
+    // at the same time), but the actual RDK mode is RT_CARTESIAN_MOTION_FORCE.
+    // Joint interfaces in the start list are ignored when tcp/* is present.
     if (starting_cartesian) {
-        // Verify no joint command interfaces are also being started
-        for (const auto& key : start_interfaces) {
-            for (std::size_t i = 0; i < info_.joints.size(); i++) {
-                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION ||
-                    key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY ||
-                    key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
-                    RCLCPP_ERROR(getLogger(),
-                        "Cannot start Cartesian and joint control simultaneously");
-                    return hardware_interface::return_type::ERROR;
-                }
-            }
-        }
-        // Store cartesian as the mode to start
         start_modes_.push_back("cartesian");
     }
 
