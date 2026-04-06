@@ -916,7 +916,12 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
         robot_->SetForceControlAxis(
             std::array<bool, flexiv::rdk::kCartDoF>{false, false, false, false, false, false});
 
-        RCLCPP_INFO(getLogger(), "RT_CARTESIAN_MOTION_FORCE mode active");
+        // Force control reference frame = TCP so that force-controlled axes
+        // (Phase 2) and max contact wrench regulation are relative to the
+        // end-effector, not the world frame.
+        robot_->SetForceControlFrame(flexiv::rdk::CoordType::TCP);
+
+        RCLCPP_INFO(getLogger(), "RT_CARTESIAN_MOTION_FORCE mode active (force frame = TCP)");
 
         cartesian_controller_running_ = true;
 
