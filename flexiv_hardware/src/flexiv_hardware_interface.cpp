@@ -55,6 +55,9 @@ const std::array<std::string, 7> kStatePoseNames = {
 const std::array<std::string, 6> kStateKxNomNames = {
     "K_x_nom_x", "K_x_nom_y", "K_x_nom_z",
     "K_x_nom_rx", "K_x_nom_ry", "K_x_nom_rz"};
+const std::array<std::string, 7> kStateToolTcpNames = {
+    "tool_tcp_x", "tool_tcp_y", "tool_tcp_z",
+    "tool_tcp_qw", "tool_tcp_qx", "tool_tcp_qy", "tool_tcp_qz"};
 
 /// Check approximate equality for doubles
 bool approx_eq(double a, double b, double eps = 1e-6)
@@ -107,6 +110,7 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
     hw_cmd_cart_nullspace_q_.resize(kJointDoF, std::numeric_limits<double>::quiet_NaN());
     hw_state_cart_pose_.fill(0.0);
     hw_state_cart_K_x_nom_.fill(0.0);
+    hw_state_tool_tcp_.fill(0.0);
 
     // Dirty flag tracking
     prev_cart_stiffness_.fill(std::numeric_limits<double>::quiet_NaN());
@@ -274,6 +278,12 @@ std::vector<hardware_interface::StateInterface> FlexivHardwareInterface::export_
             kCartPrefix, kStateKxNomNames[i], &hw_state_cart_K_x_nom_[i]));
     }
 
+    // Cartesian state: active tool TCP in flange frame [x,y,z,qw,qx,qy,qz]
+    for (std::size_t i = 0; i < kPoseSize; i++) {
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            kCartPrefix, kStateToolTcpNames[i], &hw_state_tool_tcp_[i]));
+    }
+
     return state_interfaces;
 }
 
@@ -393,14 +403,17 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_activate(
             tool->Switch(tool_name_);
 
             auto tp = tool->params();
+            for (std::size_t i = 0; i < kPoseSize; i++) {
+                hw_state_tool_tcp_[i] = tp.tcp_location[i];
+            }
             RCLCPP_INFO(getLogger(),
                 "Active tool '%s': mass=%.3f kg, CoM=[%.4f, %.4f, %.4f] m, "
                 "TCP=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
                 tool_name_.c_str(), tp.mass,
                 tp.CoM[0], tp.CoM[1], tp.CoM[2],
-                tp.tcp_location[0], tp.tcp_location[1], tp.tcp_location[2],
-                tp.tcp_location[3], tp.tcp_location[4], tp.tcp_location[5],
-                tp.tcp_location[6]);
+                hw_state_tool_tcp_[0], hw_state_tool_tcp_[1], hw_state_tool_tcp_[2],
+                hw_state_tool_tcp_[3], hw_state_tool_tcp_[4], hw_state_tool_tcp_[5],
+                hw_state_tool_tcp_[6]);
         }
 
         // Cache nominal stiffness from robot info for state interfaces

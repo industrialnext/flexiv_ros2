@@ -178,6 +178,10 @@
         <state_interface name="K_x_nom_x"/><state_interface name="K_x_nom_y"/>
         <state_interface name="K_x_nom_z"/><state_interface name="K_x_nom_rx"/>
         <state_interface name="K_x_nom_ry"/><state_interface name="K_x_nom_rz"/>
+        <state_interface name="tool_tcp_x"/><state_interface name="tool_tcp_y"/>
+        <state_interface name="tool_tcp_z"/><state_interface name="tool_tcp_qw"/>
+        <state_interface name="tool_tcp_qx"/><state_interface name="tool_tcp_qy"/>
+        <state_interface name="tool_tcp_qz"/>
       </gpio>
 
       <!-- 18 digital IO ports (16 on control box + 2 inside the wrist connector) -->

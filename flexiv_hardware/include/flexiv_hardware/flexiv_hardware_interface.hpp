@@ -158,6 +158,9 @@ private:
     // Nominal stiffness from robot info (read-only)
     std::array<double, kCartDoF> hw_state_cart_K_x_nom_;
 
+    // Active tool TCP in flange frame: [x,y,z,qw,qx,qy,qz] (read-only)
+    std::array<double, kPoseSize> hw_state_tool_tcp_;
+
     // ── Cartesian dirty flags (Option C: only call blocking APIs on change)
     std::array<double, kCartDoF> prev_cart_stiffness_;
     std::array<double, kCartDoF> prev_cart_damping_ratio_;
