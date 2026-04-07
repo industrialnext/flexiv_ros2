@@ -29,7 +29,8 @@
 #include <hardware_interface/system_interface.hpp>
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
 
-#include "flexiv_hardware/tare_status.hpp"
+#include "flexiv_hardware/flexiv_executor.hpp"
+#include "flexiv_hardware/flexiv_tare_service_node.hpp"
 #include "flexiv_hardware/visibility_control.h"
 
 // Flexiv
@@ -190,32 +191,27 @@ private:
     bool torque_controller_running_;
     bool cartesian_controller_running_;
 
-    // ── F/T sensor tare (ZeroFTSensor) ──────────────────────────────
+    // ── F/T sensor tare (ZeroFTSensor) ────────────────────���─────────
     //
-    // Status values are defined in tare_status.hpp (TareStatus::kIdle, etc.).
-    //
-    // To request a tare, write 1.0 to the tare_request command interface.
-    // The hardware interface reads and resets it each cycle.  During the
-    // tare the RT control mode is interrupted: write() becomes a no-op
-    // and any active controller should check tare_status and return OK
-    // without commanding.
-    double hw_cmd_tare_request_{0.0};
-    double hw_state_tare_status_{TareStatus::kIdle};
+    // A dedicated ROS node (FlexivTareServiceNode) hosts a blocking
+    // ~/tare service.  The service callback runs on the FlexivExecutor
+    // thread, calls run_tare_sequence(), which sets tare_in_progress_,
+    // performs the mode switch + ZeroFTSensor primitive, restores the
+    // RT mode, and clears the flag.  During tare, read()/write() no-op
+    // so controllers keep running but their commands are silently ignored.
+    std::shared_ptr<FlexivTareServiceNode> tare_node_;
+    std::shared_ptr<FlexivExecutor> executor_;
 
-    /// Background thread that performs the blocking tare sequence.
-    std::thread tare_thread_;
-
-    /// True while the tare background thread is executing.  Checked by
-    /// read()/write() to skip RT commands.
+    /// True while the tare sequence is executing.  Checked by
+    /// read()/write() to skip RT commands.  Set/cleared by
+    /// run_tare_sequence() which runs on the executor thread.
     std::atomic<bool> tare_in_progress_{false};
 
-    /// Run the blocking ZeroFTSensor sequence on a background thread.
-    /// Stops RT mode, executes the primitive, restores the previous mode,
-    /// and re-applies Cartesian configuration if applicable.
+    /// Run the blocking ZeroFTSensor sequence.  Called from the tare
+    /// service node callback (non-RT executor thread).
     void run_tare_sequence();
 
     /// Re-apply Cartesian motion-force configuration after a tare.
-    /// Called from the tare background thread (non-RT context).
     void restore_cartesian_mode();
 };
 

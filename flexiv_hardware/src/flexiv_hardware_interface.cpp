@@ -284,10 +284,6 @@ std::vector<hardware_interface::StateInterface> FlexivHardwareInterface::export_
             kCartPrefix, kStateToolTcpNames[i], &hw_state_tool_tcp_[i]));
     }
 
-    // Tare status: 0=idle, 1=in_progress, 2=complete, 3=failed
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-        "tare", "status", &hw_state_tare_status_));
-
     return state_interfaces;
 }
 
@@ -357,10 +353,6 @@ FlexivHardwareInterface::export_command_interfaces()
         command_interfaces.emplace_back(hardware_interface::CommandInterface(
             kCartPrefix, kNullspaceNames[i], &hw_cmd_cart_nullspace_q_[i]));
     }
-
-    // Tare request: write 1.0 to trigger F/T sensor zeroing
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-        "tare", "request", &hw_cmd_tare_request_));
 
     return command_interfaces;
 }
@@ -440,6 +432,16 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_activate(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    // Spin up a dedicated ROS node + executor for the tare service.
+    // The executor runs on its own thread so the service callback
+    // is independent of the controller manager's executor.
+    tare_node_ = std::make_shared<FlexivTareServiceNode>(
+        rclcpp::NodeOptions(), robot_, &tare_in_progress_,
+        [this]() { run_tare_sequence(); });
+    executor_ = std::make_shared<FlexivExecutor>();
+    executor_->add_node(tare_node_);
+    RCLCPP_INFO(getLogger(), "Tare service available at /flexiv_hardware_node/tare");
+
     RCLCPP_INFO(getLogger(), "System successfully started!");
 
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -450,10 +452,10 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 {
     RCLCPP_INFO(getLogger(), "Stopping... please wait...");
 
-    // Wait for any in-flight tare to finish before stopping the robot
-    if (tare_thread_.joinable()) {
-        tare_thread_.join();
-    }
+    // Shut down the tare service executor.  If a tare is in flight,
+    // the executor destructor waits for it to finish.
+    executor_.reset();
+    tare_node_.reset();
 
     robot_->Stop();
     cartesian_controller_running_ = false;
@@ -466,23 +468,8 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 hardware_interface::return_type FlexivHardwareInterface::read(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
-    // ── Check for tare request ──────────────────────────────────────
-    if (hw_cmd_tare_request_ >= 1.0 && !tare_in_progress_.load(std::memory_order_acquire)) {
-        hw_cmd_tare_request_ = 0.0;
-
-        // Join any previous tare thread before spawning a new one
-        if (tare_thread_.joinable()) {
-            tare_thread_.join();
-        }
-
-        hw_state_tare_status_ = TareStatus::kInProgress;
-        tare_in_progress_.store(true, std::memory_order_release);
-        tare_thread_ = std::thread(&FlexivHardwareInterface::run_tare_sequence, this);
-    }
-
-    // During tare the robot is not in RT mode — skip state reads that
-    // would fail or return stale data.  Joint positions remain at their
-    // last known values (frozen).
+    // During tare the robot is not in RT mode — skip state reads.
+    // Joint positions remain at their last known values (frozen).
     if (tare_in_progress_.load(std::memory_order_acquire)) {
         return hardware_interface::return_type::OK;
     }
@@ -1049,6 +1036,8 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
 
 void FlexivHardwareInterface::run_tare_sequence()
 {
+    tare_in_progress_.store(true, std::memory_order_release);
+
     try {
         RCLCPP_INFO(getLogger(), "[Tare] Stopping current mode for F/T sensor zeroing...");
         robot_->Stop();
@@ -1076,16 +1065,13 @@ void FlexivHardwareInterface::run_tare_sequence()
             RCLCPP_INFO(getLogger(), "[Tare] Restoring RT_JOINT_TORQUE mode...");
             robot_->SwitchMode(flexiv::rdk::Mode::RT_JOINT_TORQUE);
         } else {
-            // No controller was running — stay in idle after the primitive
             RCLCPP_INFO(getLogger(), "[Tare] No active controller; robot remains in idle.");
         }
 
-        hw_state_tare_status_ = TareStatus::kSuccess;
         RCLCPP_INFO(getLogger(), "[Tare] F/T sensor tare completed successfully");
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(getLogger(), "[Tare] Failed: %s", e.what());
-        hw_state_tare_status_ = TareStatus::kFailed;
     }
 
     tare_in_progress_.store(false, std::memory_order_release);

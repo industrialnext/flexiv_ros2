@@ -184,12 +184,6 @@
         <state_interface name="tool_tcp_qz"/>
       </gpio>
 
-      <!-- F/T sensor tare (ZeroFTSensor): write 1.0 to request, read status -->
-      <gpio name="tare">
-        <command_interface name="request"/>
-        <state_interface name="status"/>
-      </gpio>
-
       <!-- 18 digital IO ports (16 on control box + 2 inside the wrist connector) -->
       <gpio name="${prefix}gpio">
         <command_interface name="digital_output_0"/>
