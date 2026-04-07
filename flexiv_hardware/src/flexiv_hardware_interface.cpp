@@ -1096,6 +1096,18 @@ void FlexivHardwareInterface::restore_cartesian_mode()
     RCLCPP_INFO(getLogger(), "[Tare] Restoring RT_CARTESIAN_MOTION_FORCE mode...");
     robot_->SwitchMode(flexiv::rdk::Mode::RT_CARTESIAN_MOTION_FORCE);
 
+    // Seed the command pose from the current TCP so that write() streams
+    // a pose matching reality while the controller is still waking up.
+    // Without this, the stale pre-tare pose gets streamed during the gap
+    // between tare_in_progress_=false and the controller's first update().
+    const auto& tcp = robot_->states().tcp_pose;
+    for (std::size_t i = 0; i < kPoseSize; i++) {
+        hw_cmd_cart_pose_[i] = tcp[i];
+    }
+    RCLCPP_INFO(getLogger(),
+        "[Tare] Seeded command pose from TCP: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+        tcp[0], tcp[1], tcp[2], tcp[3], tcp[4], tcp[5], tcp[6]);
+
     // Re-apply Cartesian configuration that was set before the tare.
     // Force control axis
     std::array<bool, flexiv::rdk::kCartDoF> force_axes;
