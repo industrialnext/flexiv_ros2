@@ -284,6 +284,10 @@ std::vector<hardware_interface::StateInterface> FlexivHardwareInterface::export_
             kCartPrefix, kStateToolTcpNames[i], &hw_state_tool_tcp_[i]));
     }
 
+    // Tare status: 0=idle, 1=in_progress, 2=complete, 3=failed
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+        "tare", "status", &hw_state_tare_status_));
+
     return state_interfaces;
 }
 
@@ -353,6 +357,10 @@ FlexivHardwareInterface::export_command_interfaces()
         command_interfaces.emplace_back(hardware_interface::CommandInterface(
             kCartPrefix, kNullspaceNames[i], &hw_cmd_cart_nullspace_q_[i]));
     }
+
+    // Tare request: write 1.0 to trigger F/T sensor zeroing
+    command_interfaces.emplace_back(hardware_interface::CommandInterface(
+        "tare", "request", &hw_cmd_tare_request_));
 
     return command_interfaces;
 }
@@ -442,6 +450,11 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 {
     RCLCPP_INFO(getLogger(), "Stopping... please wait...");
 
+    // Wait for any in-flight tare to finish before stopping the robot
+    if (tare_thread_.joinable()) {
+        tare_thread_.join();
+    }
+
     robot_->Stop();
     cartesian_controller_running_ = false;
 
@@ -453,6 +466,27 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 hardware_interface::return_type FlexivHardwareInterface::read(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
+    // ── Check for tare request ──────────────────────────────────────
+    if (hw_cmd_tare_request_ >= 1.0 && !tare_in_progress_.load(std::memory_order_acquire)) {
+        hw_cmd_tare_request_ = 0.0;
+
+        // Join any previous tare thread before spawning a new one
+        if (tare_thread_.joinable()) {
+            tare_thread_.join();
+        }
+
+        hw_state_tare_status_ = TareStatus::kInProgress;
+        tare_in_progress_.store(true, std::memory_order_release);
+        tare_thread_ = std::thread(&FlexivHardwareInterface::run_tare_sequence, this);
+    }
+
+    // During tare the robot is not in RT mode — skip state reads that
+    // would fail or return stale data.  Joint positions remain at their
+    // last known values (frozen).
+    if (tare_in_progress_.load(std::memory_order_acquire)) {
+        return hardware_interface::return_type::OK;
+    }
+
     if (robot_->operational()) {
 
         hw_flexiv_robot_states_ = robot_->states();
@@ -524,6 +558,11 @@ void FlexivHardwareInterface::check_cartesian_dirty_flags()
 hardware_interface::return_type FlexivHardwareInterface::write(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
+    // During tare the robot is not in RT mode — skip all commands.
+    if (tare_in_progress_.load(std::memory_order_acquire)) {
+        return hardware_interface::return_type::OK;
+    }
+
     // ── Joint-level control modes ───────────────────────────────────
 
     // Initialize target vectors to hold position
@@ -1006,6 +1045,119 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
     stop_modes_.clear();
 
     return hardware_interface::return_type::OK;
+}
+
+void FlexivHardwareInterface::run_tare_sequence()
+{
+    try {
+        RCLCPP_INFO(getLogger(), "[Tare] Stopping current mode for F/T sensor zeroing...");
+        robot_->Stop();
+
+        RCLCPP_INFO(getLogger(), "[Tare] Switching to NRT_PRIMITIVE_EXECUTION...");
+        robot_->SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
+
+        RCLCPP_INFO(getLogger(), "[Tare] Executing ZeroFTSensor (robot must not be in contact)...");
+        robot_->ExecutePrimitive(
+            "ZeroFTSensor", std::map<std::string, flexiv::rdk::FlexivDataTypes>{});
+
+        // Wait for the primitive to finish
+        while (!std::get<int>(robot_->primitive_states()["terminated"])) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        RCLCPP_INFO(getLogger(), "[Tare] ZeroFTSensor complete");
+
+        // Restore the previous control mode
+        if (cartesian_controller_running_) {
+            restore_cartesian_mode();
+        } else if (position_controller_running_ || velocity_controller_running_) {
+            RCLCPP_INFO(getLogger(), "[Tare] Restoring joint position/impedance mode...");
+            robot_->SwitchMode(rdk_control_mode_);
+        } else if (torque_controller_running_) {
+            RCLCPP_INFO(getLogger(), "[Tare] Restoring RT_JOINT_TORQUE mode...");
+            robot_->SwitchMode(flexiv::rdk::Mode::RT_JOINT_TORQUE);
+        } else {
+            // No controller was running — stay in idle after the primitive
+            RCLCPP_INFO(getLogger(), "[Tare] No active controller; robot remains in idle.");
+        }
+
+        hw_state_tare_status_ = TareStatus::kSuccess;
+        RCLCPP_INFO(getLogger(), "[Tare] F/T sensor tare completed successfully");
+
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(getLogger(), "[Tare] Failed: %s", e.what());
+        hw_state_tare_status_ = TareStatus::kFailed;
+    }
+
+    tare_in_progress_.store(false, std::memory_order_release);
+}
+
+void FlexivHardwareInterface::restore_cartesian_mode()
+{
+    RCLCPP_INFO(getLogger(), "[Tare] Restoring RT_CARTESIAN_MOTION_FORCE mode...");
+    robot_->SwitchMode(flexiv::rdk::Mode::RT_CARTESIAN_MOTION_FORCE);
+
+    // Re-apply Cartesian configuration that was set before the tare.
+    // Force control axis
+    std::array<bool, flexiv::rdk::kCartDoF> force_axes;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        force_axes[i] = hw_cmd_cart_force_ctrl_axis_[i] > 0.5;
+    }
+    robot_->SetForceControlAxis(force_axes);
+
+    // Force control reference frame = TCP
+    robot_->SetForceControlFrame(flexiv::rdk::CoordType::TCP);
+
+    // Stiffness and damping (if previously set)
+    bool has_stiffness = true;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (std::isnan(prev_cart_stiffness_[i])) {
+            has_stiffness = false;
+            break;
+        }
+    }
+    if (has_stiffness) {
+        std::array<double, flexiv::rdk::kCartDoF> K_x;
+        std::array<double, flexiv::rdk::kCartDoF> Z_x;
+        for (std::size_t i = 0; i < kCartDoF; i++) {
+            K_x[i] = std::clamp(prev_cart_stiffness_[i], 0.0, hw_state_cart_K_x_nom_[i]);
+            Z_x[i] = std::clamp(prev_cart_damping_ratio_[i], 0.3, 0.8);
+        }
+        robot_->SetCartesianImpedance(K_x, Z_x);
+    }
+
+    // Max wrench (if previously set)
+    bool has_max_wrench = true;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (std::isnan(prev_cart_max_wrench_[i])) {
+            has_max_wrench = false;
+            break;
+        }
+    }
+    if (has_max_wrench) {
+        std::array<double, flexiv::rdk::kCartDoF> max_wrench;
+        for (std::size_t i = 0; i < kCartDoF; i++) {
+            max_wrench[i] = prev_cart_max_wrench_[i];
+            if (max_wrench[i] < 0.0) {
+                max_wrench[i] = std::numeric_limits<double>::infinity();
+            }
+        }
+        robot_->SetMaxContactWrench(max_wrench);
+    }
+
+    // Nullspace posture (if previously set)
+    bool has_nullspace = true;
+    for (std::size_t i = 0; i < kJointDoF; i++) {
+        if (std::isnan(prev_cart_nullspace_q_[i])) {
+            has_nullspace = false;
+            break;
+        }
+    }
+    if (has_nullspace) {
+        std::vector<double> ref_q(prev_cart_nullspace_q_.begin(), prev_cart_nullspace_q_.end());
+        robot_->SetNullSpacePosture(ref_q);
+    }
+
+    RCLCPP_INFO(getLogger(), "[Tare] RT_CARTESIAN_MOTION_FORCE mode restored");
 }
 
 } /* namespace flexiv_hardware */
