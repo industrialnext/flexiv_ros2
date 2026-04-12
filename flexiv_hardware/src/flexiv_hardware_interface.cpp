@@ -206,7 +206,7 @@ void FlexivHardwareInterface::handle_zero_ft_sensor(
 
         const auto deadline
             = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (!robot_->primitive_states().at("terminated")) {
+        while (!std::get<int>(robot_->primitive_states().at("terminated"))) {
             if (std::chrono::steady_clock::now() > deadline) {
                 throw std::runtime_error("ZeroFTSensor primitive timed out");
             }
