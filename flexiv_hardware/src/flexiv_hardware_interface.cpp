@@ -6,13 +6,17 @@
  * @author Flexiv
  */
 
-#include <vector>
+#include <chrono>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/clock.hpp>
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
+
+#include <std_srvs/srv/trigger.hpp>
 
 #include "flexiv/rdk/robot.hpp"
 #include "flexiv_hardware/flexiv_hardware_interface.hpp"
@@ -157,8 +161,71 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
     // of 3 failures within 60 seconds.
     robot_->SetTimelinessFailureLimit(20);
 
+    // ── /zero_ft_sensor service ──────────────────────────────────────
+    // A lightweight internal node + background executor that exposes
+    // std_srvs/Trigger on /zero_ft_sensor.  This reuses the existing
+    // robot_ connection rather than opening a second RDK client.
+    zero_ft_node_ = std::make_shared<rclcpp::Node>("flexiv_hardware_zero_ft");
+    zero_ft_srv_ = zero_ft_node_->create_service<std_srvs::srv::Trigger>(
+        "/zero_ft_sensor",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+            handle_zero_ft_sensor(req, res);
+        });
+    zero_ft_executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+    zero_ft_executor_->add_node(zero_ft_node_);
+    zero_ft_thread_ = std::thread([this]() { zero_ft_executor_->spin(); });
+
     RCLCPP_INFO(getLogger(), "Successfully connected to robot");
+    RCLCPP_INFO(getLogger(), "ZeroFTSensor service available at /zero_ft_sensor");
     return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+void FlexivHardwareInterface::handle_zero_ft_sensor(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    if (!robot_->operational()) {
+        response->success = false;
+        response->message = "Robot is not operational";
+        return;
+    }
+
+    RCLCPP_INFO(getLogger(), "ZeroFTSensor: pausing write loop ...");
+    zero_ft_in_progress_.store(true);
+
+    // Give the RT write() thread one cycle to see the flag (~2 ms headroom).
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    try {
+        robot_->Stop();
+        robot_->SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
+        RCLCPP_WARN(getLogger(),
+            "ZeroFTSensor: zeroing — robot must not contact anything");
+        robot_->ExecutePrimitive("ZeroFTSensor", {});
+
+        const auto deadline
+            = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!robot_->primitive_states().at("terminated")) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                throw std::runtime_error("ZeroFTSensor primitive timed out");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        // Restore joint control mode so write() resumes.
+        robot_->SwitchMode(rdk_control_mode_);
+        zero_ft_in_progress_.store(false);
+
+        RCLCPP_INFO(getLogger(), "ZeroFTSensor: complete, control mode restored");
+        response->success = true;
+        response->message = "FT sensor zeroed successfully";
+    } catch (const std::exception& e) {
+        zero_ft_in_progress_.store(false);
+        RCLCPP_ERROR(getLogger(), "ZeroFTSensor failed: %s", e.what());
+        response->success = false;
+        response->message = e.what();
+    }
 }
 
 rclcpp::Logger FlexivHardwareInterface::getLogger()
@@ -268,6 +335,13 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 {
     RCLCPP_INFO(getLogger(), "Stopping... please wait...");
 
+    if (zero_ft_executor_) {
+        zero_ft_executor_->cancel();
+    }
+    if (zero_ft_thread_.joinable()) {
+        zero_ft_thread_.join();
+    }
+
     robot_->Stop();
 
     RCLCPP_INFO(getLogger(), "System successfully stopped!");
@@ -302,6 +376,11 @@ hardware_interface::return_type FlexivHardwareInterface::read(
 hardware_interface::return_type FlexivHardwareInterface::write(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
+    // Skip all commands while ZeroFTSensor is executing.
+    if (zero_ft_in_progress_.load()) {
+        return hardware_interface::return_type::OK;
+    }
+
     // Initialize target vectors to hold position
     std::vector<double> target_pos(robot_->info().DoF);
     std::vector<double> target_vel(robot_->info().DoF);

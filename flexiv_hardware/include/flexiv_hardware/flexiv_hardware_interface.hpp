@@ -9,17 +9,22 @@
 #ifndef FLEXIV_HARDWARE__FLEXIV_HARDWARE_INTERFACE_HPP_
 #define FLEXIV_HARDWARE__FLEXIV_HARDWARE_INTERFACE_HPP_
 
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ROS
 #include <rclcpp/clock.hpp>
 #include <rclcpp/duration.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/macros.hpp>
 #include <rclcpp/logger.hpp>
+#include <rclcpp/node.hpp>
 #include <rclcpp/time.hpp>
 #include <rclcpp_lifecycle/state.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 // ros2_control hardware_interface
 #include <hardware_interface/hardware_info.hpp>
@@ -114,6 +119,21 @@ private:
     std::map<unsigned int, bool> current_digital_outputs_;
 
     static rclcpp::Logger getLogger();
+
+    void handle_zero_ft_sensor(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
+    // Internal node + executor for the /zero_ft_sensor service.
+    // Runs in a background thread; uses robot_ directly.
+    std::shared_ptr<rclcpp::Node> zero_ft_node_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr zero_ft_srv_;
+    std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> zero_ft_executor_;
+    std::thread zero_ft_thread_;
+
+    // Set to true while ZeroFTSensor is executing so write() skips
+    // SendJointPosition. Cleared when the primitive finishes.
+    std::atomic<bool> zero_ft_in_progress_{false};
 
     // control modes
     bool controllers_initialized_;

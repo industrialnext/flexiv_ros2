@@ -17,6 +17,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(flexiv_rdk REQUIRED)
 
 add_library(
@@ -43,6 +44,7 @@ ament_target_dependencies(
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  std_srvs
 )
 
 pluginlib_export_plugin_description_file(hardware_interface flexiv_hardware_interface_plugin.xml)
