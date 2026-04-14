@@ -946,20 +946,6 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
         prev_cart_force_ctrl_axis_.fill(std::numeric_limits<double>::quiet_NaN());
         prev_cart_nullspace_q_.assign(kJointDoF, std::numeric_limits<double>::quiet_NaN());
 
-        // Zero F/T sensor before entering Cartesian mode (as per Flexiv
-        // intermediate5 example). Without this, sensor bias from tool weight
-        // and cable routing feeds into max contact wrench regulation and
-        // causes unexpected motion on activation.
-        // Requires NRT_PRIMITIVE_EXECUTION mode — blocking, takes ~1-2s.
-        RCLCPP_INFO(getLogger(), "Zeroing F/T sensor (robot must not be in contact)...");
-        robot_->SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
-        robot_->ExecutePrimitive("ZeroFTSensor", std::map<std::string, flexiv::rdk::FlexivDataTypes>{});
-        // Wait for primitive to finish
-        while (!std::get<int>(robot_->primitive_states()["terminated"])) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        RCLCPP_INFO(getLogger(), "F/T sensor zeroing complete");
-
         // Switch to RT Cartesian motion-force mode
         RCLCPP_INFO(getLogger(), "Switching to RT_CARTESIAN_MOTION_FORCE mode");
         robot_->SwitchMode(flexiv::rdk::Mode::RT_CARTESIAN_MOTION_FORCE);
