@@ -22,8 +22,9 @@ namespace gpio_controller {
 /** Number of digital IO ports (16 on control box + 2 inside the wrist connector) */
 constexpr size_t kIOPorts = 18;
 
-const std::string kGPIOInputsTopic = "/gpio_inputs";
-const std::string kGPIOOutputsTopic = "/gpio_outputs";
+// Relative topic names — resolved against the node's namespace.
+const std::string kGPIOInputsTopic = "gpio_inputs";
+const std::string kGPIOOutputsTopic = "gpio_outputs";
 
 using CmdType = flexiv_msgs::msg::GPIOStates;
 

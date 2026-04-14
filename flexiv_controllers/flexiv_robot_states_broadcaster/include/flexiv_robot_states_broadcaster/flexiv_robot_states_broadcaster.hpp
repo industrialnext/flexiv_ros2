@@ -22,13 +22,15 @@
 namespace flexiv_robot_states_broadcaster {
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-const std::string kRobotStatesTopic = "/flexiv_robot_states";
-const std::string kTcpPoseTopic = "/tcp_pose";
-const std::string kTcpVelocityTopic = "/tcp_velocity";
-const std::string kFlangePoseTopic = "/flange_pose";
-const std::string kFTSensorTopic = "/ft_sensor_wrench";
-const std::string kExternalWrenchInTcpFrameTopic = "/external_wrench_in_tcp";
-const std::string kExternalWrenchInWorldFrameTopic = "/external_wrench_in_world";
+// Relative topic names — resolved against the node's namespace so that
+// launch-time `namespace=arm/right` yields `/arm/right/tcp_pose`, etc.
+const std::string kRobotStatesTopic = "flexiv_robot_states";
+const std::string kTcpPoseTopic = "tcp_pose";
+const std::string kTcpVelocityTopic = "tcp_velocity";
+const std::string kFlangePoseTopic = "flange_pose";
+const std::string kFTSensorTopic = "ft_sensor_wrench";
+const std::string kExternalWrenchInTcpFrameTopic = "external_wrench_in_tcp";
+const std::string kExternalWrenchInWorldFrameTopic = "external_wrench_in_world";
 
 class FlexivRobotStatesBroadcaster : public controller_interface::ControllerInterface
 {
