@@ -4,3 +4,13 @@ flexiv_robot_states_broadcaster:
     default_value: "",
     description: "Robot arm serial number",
   }
+  base_frame_id: {
+    type: string,
+    default_value: "world",
+    description: "Frame id used for wrenches and poses expressed in the robot base frame (e.g. '<prefix>base_link').",
+  }
+  flange_frame_id: {
+    type: string,
+    default_value: "",
+    description: "Frame id used for wrenches expressed in the flange/TCP frame (e.g. '<prefix>flange'). Defaults to '<robot_sn>_flange' when empty for backwards compatibility.",
+  }

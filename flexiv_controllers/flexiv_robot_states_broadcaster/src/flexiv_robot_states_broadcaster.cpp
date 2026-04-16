@@ -57,9 +57,13 @@ CallbackReturn FlexivRobotStatesBroadcaster::on_configure(
         return CallbackReturn::ERROR;
     }
 
+    const std::string base_frame_id = params_.base_frame_id;
+    const std::string flange_frame_id
+        = params_.flange_frame_id.empty() ? robot_sn + "_flange" : params_.flange_frame_id;
+
     if (!flexiv_robot_states_) {
         flexiv_robot_states_ = std::make_unique<semantic_components::FlexivRobotStates>(
-            semantic_components::FlexivRobotStates(robot_sn));
+            semantic_components::FlexivRobotStates(robot_sn, base_frame_id, flange_frame_id));
     }
 
     // Topic names are relative and inherit the node's namespace, so launching
