@@ -955,20 +955,21 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
         robot_->SetForceControlAxis(
             std::array<bool, flexiv::rdk::kCartDoF>{false, false, false, false, false, false});
 
-        // Force control reference frame = WORLD so that force-controlled
-        // axes and target wrench align with the world frame. This matches
-        // the convention used by the ROS-side ForceControlCommand message
-        // (wrench + axis selection in base/world frame), which is also
-        // what CartesianController (Pinocchio) uses.
+        // Force control reference frame = TCP so that force-controlled
+        // axes and target wrench follow the tool as it reorients. The
+        // ROS-side ForceControlCommand now specifies wrench + axis selection
+        // in the TCP frame as well, which is the natural choice for tasks
+        // like "push along the tool normal while aligning to a surface"
+        // (DIMM pickup, polishing, etc.). With TCP frame, the firmware's
+        // internal force loop tracks wrench in the tool's current axes each
+        // cycle, so rotating the end-effector automatically rotates the
+        // commanded force direction without any client-side transform.
         //
-        // If TCP-frame force control is needed in the future (e.g.
-        // polishing along the tool normal), this can be made configurable
-        // via a command interface driven by a controller parameter.
         // SetForceControlFrame is a blocking call, so it should only be
         // changed on activation or via the dirty-flag path, not per-cycle.
-        robot_->SetForceControlFrame(flexiv::rdk::CoordType::WORLD);
+        robot_->SetForceControlFrame(flexiv::rdk::CoordType::TCP);
 
-        RCLCPP_INFO(getLogger(), "RT_CARTESIAN_MOTION_FORCE mode active (force frame = WORLD)");
+        RCLCPP_INFO(getLogger(), "RT_CARTESIAN_MOTION_FORCE mode active (force frame = TCP)");
 
         cartesian_controller_running_ = true;
 
@@ -1096,8 +1097,8 @@ void FlexivHardwareInterface::restore_cartesian_mode()
     }
     robot_->SetForceControlAxis(force_axes);
 
-    // Force control reference frame = WORLD (must match mode entry above)
-    robot_->SetForceControlFrame(flexiv::rdk::CoordType::WORLD);
+    // Force control reference frame = TCP (must match mode entry above)
+    robot_->SetForceControlFrame(flexiv::rdk::CoordType::TCP);
 
     // Stiffness and damping (if previously set)
     bool has_stiffness = true;
