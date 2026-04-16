@@ -29,9 +29,6 @@
 
 namespace {
 
-const std::string kWorldFrameId = "world";
-const std::string kFlangeFrameId = "flange";
-
 // Example implementation of bit_cast: https://en.cppreference.com/w/cpp/numeric/bit_cast
 template <class To, class From>
 std::enable_if_t<sizeof(To) == sizeof(From) && std::is_trivially_copyable<From>::value
@@ -54,8 +51,11 @@ namespace semantic_components {
 class FlexivRobotStates : public SemanticComponentInterface<flexiv_msgs::msg::RobotStates>
 {
 public:
-    FlexivRobotStates(const std::string& name)
+    FlexivRobotStates(const std::string& name, const std::string& base_frame_id,
+        const std::string& flange_frame_id)
     : SemanticComponentInterface(name, 1)
+    , base_frame_id_(base_frame_id)
+    , flange_frame_id_(flange_frame_id)
     {
         interface_names_.emplace_back(name_ + "/" + state_interface_name_);
     }
@@ -64,14 +64,14 @@ public:
 
     void init_robot_states_message(flexiv_msgs::msg::RobotStates& message)
     {
-        message.tcp_pose.header.frame_id = kWorldFrameId;
-        message.tcp_vel.header.frame_id = kWorldFrameId;
-        message.flange_pose.header.frame_id = kWorldFrameId;
-        message.ft_sensor_raw.header.frame_id = name_ + "_" + kFlangeFrameId;
-        message.ext_wrench_in_tcp.header.frame_id = name_ + "_" + kFlangeFrameId;
-        message.ext_wrench_in_world.header.frame_id = kWorldFrameId;
-        message.ext_wrench_in_tcp_raw.header.frame_id = name_ + "_" + kFlangeFrameId;
-        message.ext_wrench_in_world_raw.header.frame_id = kWorldFrameId;
+        message.tcp_pose.header.frame_id = base_frame_id_;
+        message.tcp_vel.header.frame_id = base_frame_id_;
+        message.flange_pose.header.frame_id = base_frame_id_;
+        message.ft_sensor_raw.header.frame_id = flange_frame_id_;
+        message.ext_wrench_in_tcp.header.frame_id = flange_frame_id_;
+        message.ext_wrench_in_world.header.frame_id = base_frame_id_;
+        message.ext_wrench_in_tcp_raw.header.frame_id = flange_frame_id_;
+        message.ext_wrench_in_world_raw.header.frame_id = base_frame_id_;
     }
 
     /// Return RobotStates message
@@ -139,6 +139,8 @@ protected:
     flexiv::rdk::RobotStates* flexiv_robot_states_ptr;
 
     const std::string state_interface_name_ {"flexiv_robot_states"};
+    std::string base_frame_id_;
+    std::string flange_frame_id_;
 
     // Convert std::vector to std::array
     std::array<double, 7> toJointStateMsg(const std::vector<double>& joint_values)

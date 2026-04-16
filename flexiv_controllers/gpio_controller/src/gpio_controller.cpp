@@ -79,23 +79,22 @@ controller_interface::CallbackReturn GPIOController::on_configure(
 {
     params_ = param_listener_->get_params();
 
-    std::string robot_sn = params_.robot_sn;
+    const std::string& robot_sn = params_.robot_sn;
     if (robot_sn.empty()) {
         RCLCPP_ERROR(get_node()->get_logger(), "'robot_sn' parameter has to be specified.");
         return CallbackReturn::ERROR;
-    } else {
-        // Replace "-" with "_" in robot_sn to match the topic name
-        std::replace(robot_sn.begin(), robot_sn.end(), '-', '_');
     }
 
     try {
-        // register publisher
+        // Relative topic names — inherit the node's namespace so launches
+        // can set namespace=<robot_sn> (old behavior) or namespace=arm/right
+        // (multi-arm setup) to get the desired topic paths.
         gpio_inputs_publisher_ = get_node()->create_publisher<CmdType>(
-            "/" + robot_sn + kGPIOInputsTopic, rclcpp::SystemDefaultsQoS());
+            kGPIOInputsTopic, rclcpp::SystemDefaultsQoS());
 
         // register subscriber
         gpio_outputs_command_
-            = get_node()->create_subscription<CmdType>("/" + robot_sn + kGPIOOutputsTopic,
+            = get_node()->create_subscription<CmdType>(kGPIOOutputsTopic,
                 rclcpp::SystemDefaultsQoS(), [this](const CmdType::SharedPtr msg) {
                     for (size_t i = 0; i < msg->states.size(); ++i) {
                         if (msg->states[i].pin >= kIOPorts) {

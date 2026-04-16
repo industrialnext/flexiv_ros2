@@ -57,34 +57,37 @@ CallbackReturn FlexivRobotStatesBroadcaster::on_configure(
         return CallbackReturn::ERROR;
     }
 
+    const std::string base_frame_id = params_.base_frame_id;
+    const std::string flange_frame_id
+        = params_.flange_frame_id.empty() ? robot_sn + "_flange" : params_.flange_frame_id;
+
     if (!flexiv_robot_states_) {
         flexiv_robot_states_ = std::make_unique<semantic_components::FlexivRobotStates>(
-            semantic_components::FlexivRobotStates(robot_sn));
+            semantic_components::FlexivRobotStates(robot_sn, base_frame_id, flange_frame_id));
     }
 
-    // Replace "-" with "_" in robot_sn to match the topic name
-    std::replace(robot_sn.begin(), robot_sn.end(), '-', '_');
-
-    // Create the publishers for the robot states
+    // Topic names are relative and inherit the node's namespace, so launching
+    // with `namespace=arm/right` yields /arm/right/tcp_pose etc. To preserve
+    // the old robot_sn-based topics, launch with namespace=<robot_sn>.
     tcp_pose_publisher_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
-        "/" + robot_sn + kTcpPoseTopic, rclcpp::SystemDefaultsQoS());
+        kTcpPoseTopic, rclcpp::SystemDefaultsQoS());
     tcp_velocity_publisher_ = get_node()->create_publisher<geometry_msgs::msg::AccelStamped>(
-        "/" + robot_sn + kTcpVelocityTopic, rclcpp::SystemDefaultsQoS());
+        kTcpVelocityTopic, rclcpp::SystemDefaultsQoS());
     flange_pose_publisher_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
-        "/" + robot_sn + kFlangePoseTopic, rclcpp::SystemDefaultsQoS());
+        kFlangePoseTopic, rclcpp::SystemDefaultsQoS());
     ft_sensor_publisher_ = get_node()->create_publisher<geometry_msgs::msg::WrenchStamped>(
-        "/" + robot_sn + kFTSensorTopic, rclcpp::SystemDefaultsQoS());
+        kFTSensorTopic, rclcpp::SystemDefaultsQoS());
     external_wrench_in_tcp_publisher_
         = get_node()->create_publisher<geometry_msgs::msg::WrenchStamped>(
-            "/" + robot_sn + kExternalWrenchInTcpFrameTopic, rclcpp::SystemDefaultsQoS());
+            kExternalWrenchInTcpFrameTopic, rclcpp::SystemDefaultsQoS());
     external_wrench_in_world_publisher_
         = get_node()->create_publisher<geometry_msgs::msg::WrenchStamped>(
-            "/" + robot_sn + kExternalWrenchInWorldFrameTopic, rclcpp::SystemDefaultsQoS());
+            kExternalWrenchInWorldFrameTopic, rclcpp::SystemDefaultsQoS());
 
     try {
         flexiv_robot_states_publisher_
             = get_node()->create_publisher<flexiv_msgs::msg::RobotStates>(
-                "/" + robot_sn + kRobotStatesTopic, rclcpp::SystemDefaultsQoS());
+                kRobotStatesTopic, rclcpp::SystemDefaultsQoS());
         realtime_flexiv_robot_states_publisher_
             = std::make_unique<StatePublisher>(flexiv_robot_states_publisher_);
         // Initialize the robot states message

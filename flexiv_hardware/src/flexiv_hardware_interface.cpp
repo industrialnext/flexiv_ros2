@@ -8,6 +8,8 @@
 
 #include <vector>
 #include <string>
+#include <cmath>
+#include <limits>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/clock.hpp>
@@ -22,7 +24,48 @@ namespace {
 constexpr double kMaxJointVelocity = 2.0;
 constexpr double kMaxJointAcceleration = 3.0;
 
+// Cartesian command interface name prefix (used as a gpio-style component)
+const std::string kCartPrefix = "tcp";
+
+// Interface names for Cartesian commands
+const std::array<std::string, 7> kPoseNames = {
+    "pose_x", "pose_y", "pose_z", "pose_qw", "pose_qx", "pose_qy", "pose_qz"};
+const std::array<std::string, 6> kWrenchNames = {
+    "wrench_fx", "wrench_fy", "wrench_fz", "wrench_mx", "wrench_my", "wrench_mz"};
+const std::array<std::string, 6> kStiffnessNames = {
+    "stiffness_x", "stiffness_y", "stiffness_z",
+    "stiffness_rx", "stiffness_ry", "stiffness_rz"};
+const std::array<std::string, 6> kDampingRatioNames = {
+    "damping_ratio_x", "damping_ratio_y", "damping_ratio_z",
+    "damping_ratio_rx", "damping_ratio_ry", "damping_ratio_rz"};
+const std::array<std::string, 6> kMaxWrenchNames = {
+    "max_wrench_fx", "max_wrench_fy", "max_wrench_fz",
+    "max_wrench_mx", "max_wrench_my", "max_wrench_mz"};
+const std::array<std::string, 6> kForceCtrlAxisNames = {
+    "force_ctrl_x", "force_ctrl_y", "force_ctrl_z",
+    "force_ctrl_rx", "force_ctrl_ry", "force_ctrl_rz"};
+const std::array<std::string, 7> kNullspaceNames = {
+    "nullspace_q1", "nullspace_q2", "nullspace_q3", "nullspace_q4",
+    "nullspace_q5", "nullspace_q6", "nullspace_q7"};
+
+// State interface names
+const std::array<std::string, 7> kStatePoseNames = {
+    "state_pose_x", "state_pose_y", "state_pose_z",
+    "state_pose_qw", "state_pose_qx", "state_pose_qy", "state_pose_qz"};
+const std::array<std::string, 6> kStateKxNomNames = {
+    "K_x_nom_x", "K_x_nom_y", "K_x_nom_z",
+    "K_x_nom_rx", "K_x_nom_ry", "K_x_nom_rz"};
+const std::array<std::string, 7> kStateToolTcpNames = {
+    "tool_tcp_x", "tool_tcp_y", "tool_tcp_z",
+    "tool_tcp_qw", "tool_tcp_qx", "tool_tcp_qy", "tool_tcp_qz"};
+
+/// Check approximate equality for doubles
+bool approx_eq(double a, double b, double eps = 1e-6)
+{
+    return std::abs(a - b) < eps;
 }
+
+} // namespace
 
 namespace flexiv_hardware {
 
@@ -54,7 +97,27 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
     position_controller_running_ = false;
     velocity_controller_running_ = false;
     torque_controller_running_ = false;
+    cartesian_controller_running_ = false;
     controllers_initialized_ = false;
+
+    // Initialize Cartesian command arrays
+    hw_cmd_cart_pose_.fill(std::numeric_limits<double>::quiet_NaN());
+    hw_cmd_cart_wrench_.fill(0.0);
+    hw_cmd_cart_stiffness_.fill(std::numeric_limits<double>::quiet_NaN());
+    hw_cmd_cart_damping_ratio_.fill(0.7);  // Flexiv nominal
+    hw_cmd_cart_max_wrench_.fill(std::numeric_limits<double>::infinity());
+    hw_cmd_cart_force_ctrl_axis_.fill(0.0);  // All motion-controlled
+    hw_cmd_cart_nullspace_q_.resize(kJointDoF, std::numeric_limits<double>::quiet_NaN());
+    hw_state_cart_pose_.fill(0.0);
+    hw_state_cart_K_x_nom_.fill(0.0);
+    hw_state_tool_tcp_.fill(0.0);
+
+    // Dirty flag tracking
+    prev_cart_stiffness_.fill(std::numeric_limits<double>::quiet_NaN());
+    prev_cart_damping_ratio_.fill(std::numeric_limits<double>::quiet_NaN());
+    prev_cart_max_wrench_.fill(std::numeric_limits<double>::quiet_NaN());
+    prev_cart_force_ctrl_axis_.fill(std::numeric_limits<double>::quiet_NaN());
+    prev_cart_nullspace_q_.resize(kJointDoF, std::numeric_limits<double>::quiet_NaN());
 
     if (info_.joints.size() != kJointDoF) {
         RCLCPP_FATAL(getLogger(), "Got %ld joints. Expected %ld.", info_.joints.size(), kJointDoF);
@@ -180,6 +243,8 @@ std::vector<hardware_interface::StateInterface> FlexivHardwareInterface::export_
     RCLCPP_INFO(getLogger(), "export_state_interfaces");
 
     std::vector<hardware_interface::StateInterface> state_interfaces;
+
+    // Joint states
     for (std::size_t i = 0; i < info_.joints.size(); i++) {
         state_interfaces.emplace_back(hardware_interface::StateInterface(info_.joints[i].name,
             hardware_interface::HW_IF_POSITION, &hw_states_joint_positions_[i]));
@@ -189,14 +254,34 @@ std::vector<hardware_interface::StateInterface> FlexivHardwareInterface::export_
             info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &hw_states_joint_efforts_[i]));
     }
 
+    // Flexiv robot states (raw struct pointer)
     std::string robot_sn = info_.hardware_parameters.at("robot_sn");
     state_interfaces.emplace_back(hardware_interface::StateInterface(
         robot_sn, "flexiv_robot_states", reinterpret_cast<double*>(&hw_flexiv_robot_states_addr_)));
 
+    // GPIO inputs
     const std::string prefix = info_.hardware_parameters.at("prefix");
     for (std::size_t i = 0; i < flexiv::rdk::kIOPorts; i++) {
         state_interfaces.emplace_back(hardware_interface::StateInterface(
             prefix + "gpio", "digital_input_" + std::to_string(i), &hw_states_gpio_in_[i]));
+    }
+
+    // Cartesian state: current TCP pose [x,y,z,qw,qx,qy,qz]
+    for (std::size_t i = 0; i < kPoseSize; i++) {
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            kCartPrefix, kStatePoseNames[i], &hw_state_cart_pose_[i]));
+    }
+
+    // Cartesian state: nominal stiffness K_x_nom (read-only, from robot info)
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            kCartPrefix, kStateKxNomNames[i], &hw_state_cart_K_x_nom_[i]));
+    }
+
+    // Cartesian state: active tool TCP in flange frame [x,y,z,qw,qx,qy,qz]
+    for (std::size_t i = 0; i < kPoseSize; i++) {
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            kCartPrefix, kStateToolTcpNames[i], &hw_state_tool_tcp_[i]));
     }
 
     return state_interfaces;
@@ -208,6 +293,8 @@ FlexivHardwareInterface::export_command_interfaces()
     RCLCPP_INFO(getLogger(), "export_command_interfaces");
 
     std::vector<hardware_interface::CommandInterface> command_interfaces;
+
+    // Joint commands
     for (size_t i = 0; i < info_.joints.size(); i++) {
         command_interfaces.emplace_back(hardware_interface::CommandInterface(info_.joints[i].name,
             hardware_interface::HW_IF_POSITION, &hw_commands_joint_positions_[i]));
@@ -217,10 +304,54 @@ FlexivHardwareInterface::export_command_interfaces()
             hardware_interface::HW_IF_EFFORT, &hw_commands_joint_efforts_[i]));
     }
 
+    // GPIO outputs
     const std::string prefix = info_.hardware_parameters.at("prefix");
     for (size_t i = 0; i < flexiv::rdk::kIOPorts; i++) {
         command_interfaces.emplace_back(hardware_interface::CommandInterface(
             prefix + "gpio", "digital_output_" + std::to_string(i), &hw_commands_gpio_out_[i]));
+    }
+
+    // ── Cartesian command interfaces ────────────────────────────────
+    // Target pose [x,y,z,qw,qx,qy,qz]
+    for (std::size_t i = 0; i < kPoseSize; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kPoseNames[i], &hw_cmd_cart_pose_[i]));
+    }
+
+    // Target wrench [fx,fy,fz,mx,my,mz] (Phase 2: force-controlled axes)
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kWrenchNames[i], &hw_cmd_cart_wrench_[i]));
+    }
+
+    // Impedance stiffness [kx,ky,kz,krx,kry,krz]
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kStiffnessNames[i], &hw_cmd_cart_stiffness_[i]));
+    }
+
+    // Impedance damping ratio [zx,zy,zz,zrx,zry,zrz]
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kDampingRatioNames[i], &hw_cmd_cart_damping_ratio_[i]));
+    }
+
+    // Maximum contact wrench [fx,fy,fz,mx,my,mz]
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kMaxWrenchNames[i], &hw_cmd_cart_max_wrench_[i]));
+    }
+
+    // Per-axis force control enable (Phase 2)
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kForceCtrlAxisNames[i], &hw_cmd_cart_force_ctrl_axis_[i]));
+    }
+
+    // Nullspace reference joint positions
+    for (std::size_t i = 0; i < kJointDoF; i++) {
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            kCartPrefix, kNullspaceNames[i], &hw_cmd_cart_nullspace_q_[i]));
     }
 
     return command_interfaces;
@@ -272,20 +403,44 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_activate(
             tool->Switch(tool_name_);
 
             auto tp = tool->params();
+            for (std::size_t i = 0; i < kPoseSize; i++) {
+                hw_state_tool_tcp_[i] = tp.tcp_location[i];
+            }
             RCLCPP_INFO(getLogger(),
                 "Active tool '%s': mass=%.3f kg, CoM=[%.4f, %.4f, %.4f] m, "
                 "TCP=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
                 tool_name_.c_str(), tp.mass,
                 tp.CoM[0], tp.CoM[1], tp.CoM[2],
-                tp.tcp_location[0], tp.tcp_location[1], tp.tcp_location[2],
-                tp.tcp_location[3], tp.tcp_location[4], tp.tcp_location[5],
-                tp.tcp_location[6]);
+                hw_state_tool_tcp_[0], hw_state_tool_tcp_[1], hw_state_tool_tcp_[2],
+                hw_state_tool_tcp_[3], hw_state_tool_tcp_[4], hw_state_tool_tcp_[5],
+                hw_state_tool_tcp_[6]);
         }
+
+        // Cache nominal stiffness from robot info for state interfaces
+        auto K_nom = robot_->info().K_x_nom;
+        for (std::size_t i = 0; i < kCartDoF; i++) {
+            hw_state_cart_K_x_nom_[i] = K_nom[i];
+        }
+        RCLCPP_INFO(getLogger(),
+            "Robot nominal Cartesian stiffness K_x_nom: "
+            "[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
+            K_nom[0], K_nom[1], K_nom[2], K_nom[3], K_nom[4], K_nom[5]);
+
     } catch (const std::exception& e) {
         RCLCPP_FATAL(getLogger(), "Could not enable robot.");
         RCLCPP_FATAL(getLogger(), e.what());
         return hardware_interface::CallbackReturn::ERROR;
     }
+
+    // Spin up a dedicated ROS node + executor for the tare service.
+    // The executor runs on its own thread so the service callback
+    // is independent of the controller manager's executor.
+    tare_node_ = std::make_shared<FlexivTareServiceNode>(
+        rclcpp::NodeOptions(), robot_, &tare_in_progress_,
+        [this]() { run_tare_sequence(); });
+    executor_ = std::make_shared<FlexivExecutor>();
+    executor_->add_node(tare_node_);
+    RCLCPP_INFO(getLogger(), "Tare service available at /flexiv_hardware_node/tare");
 
     RCLCPP_INFO(getLogger(), "System successfully started!");
 
@@ -297,7 +452,13 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 {
     RCLCPP_INFO(getLogger(), "Stopping... please wait...");
 
+    // Shut down the tare service executor.  If a tare is in flight,
+    // the executor destructor waits for it to finish.
+    executor_.reset();
+    tare_node_.reset();
+
     robot_->Stop();
+    cartesian_controller_running_ = false;
 
     RCLCPP_INFO(getLogger(), "System successfully stopped!");
 
@@ -307,6 +468,12 @@ hardware_interface::CallbackReturn FlexivHardwareInterface::on_deactivate(
 hardware_interface::return_type FlexivHardwareInterface::read(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
+    // During tare the robot is not in RT mode — skip state reads.
+    // Joint positions remain at their last known values (frozen).
+    if (tare_in_progress_.load(std::memory_order_acquire)) {
+        return hardware_interface::return_type::OK;
+    }
+
     if (robot_->operational()) {
 
         hw_flexiv_robot_states_ = robot_->states();
@@ -323,14 +490,68 @@ hardware_interface::return_type FlexivHardwareInterface::read(
         for (size_t i = 0; i < hw_states_gpio_in_.size(); i++) {
             hw_states_gpio_in_[i] = static_cast<double>(gpio_in[i]);
         }
+
+        // Read current TCP pose for state interface
+        const auto& tcp = robot_->states().tcp_pose;
+        for (std::size_t i = 0; i < kPoseSize; i++) {
+            hw_state_cart_pose_[i] = tcp[i];
+        }
     }
 
     return hardware_interface::return_type::OK;
 }
 
+void FlexivHardwareInterface::check_cartesian_dirty_flags()
+{
+    // Check stiffness + damping ratio (always sent together)
+    cart_stiffness_dirty_ = false;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (!approx_eq(hw_cmd_cart_stiffness_[i], prev_cart_stiffness_[i]) ||
+            !approx_eq(hw_cmd_cart_damping_ratio_[i], prev_cart_damping_ratio_[i])) {
+            cart_stiffness_dirty_ = true;
+            break;
+        }
+    }
+
+    // Check max wrench
+    cart_max_wrench_dirty_ = false;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (!approx_eq(hw_cmd_cart_max_wrench_[i], prev_cart_max_wrench_[i])) {
+            cart_max_wrench_dirty_ = true;
+            break;
+        }
+    }
+
+    // Check force control axis (Phase 2)
+    cart_force_ctrl_axis_dirty_ = false;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (!approx_eq(hw_cmd_cart_force_ctrl_axis_[i], prev_cart_force_ctrl_axis_[i])) {
+            cart_force_ctrl_axis_dirty_ = true;
+            break;
+        }
+    }
+
+    // Check nullspace
+    cart_nullspace_dirty_ = false;
+    for (std::size_t i = 0; i < kJointDoF; i++) {
+        if (!approx_eq(hw_cmd_cart_nullspace_q_[i], prev_cart_nullspace_q_[i]) &&
+            !std::isnan(hw_cmd_cart_nullspace_q_[i])) {
+            cart_nullspace_dirty_ = true;
+            break;
+        }
+    }
+}
+
 hardware_interface::return_type FlexivHardwareInterface::write(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
+    // During tare the robot is not in RT mode — skip all commands.
+    if (tare_in_progress_.load(std::memory_order_acquire)) {
+        return hardware_interface::return_type::OK;
+    }
+
+    // ── Joint-level control modes ───────────────────────────────────
+
     // Initialize target vectors to hold position
     std::vector<double> target_pos(robot_->info().DoF);
     std::vector<double> target_vel(robot_->info().DoF);
@@ -367,7 +588,138 @@ hardware_interface::return_type FlexivHardwareInterface::write(
         robot_->StreamJointTorque(target_torque, true, true);
     }
 
-    // Write digital output
+    // ── Cartesian motion-force control mode ─────────────────────────
+    if (cartesian_controller_running_
+        && robot_->mode() == flexiv::rdk::Mode::RT_CARTESIAN_MOTION_FORCE) {
+
+        // Check if pose command is valid (not NaN)
+        bool pose_valid = true;
+        for (std::size_t i = 0; i < kPoseSize; i++) {
+            if (std::isnan(hw_cmd_cart_pose_[i])) {
+                pose_valid = false;
+                break;
+            }
+        }
+
+        if (pose_valid) {
+            // Build the pose array for StreamCartesianMotionForce
+            std::array<double, flexiv::rdk::kPoseSize> target_pose;
+            for (std::size_t i = 0; i < kPoseSize; i++) {
+                target_pose[i] = hw_cmd_cart_pose_[i];
+            }
+
+            // Build wrench array (Phase 2: will be non-zero for force-controlled axes)
+            std::array<double, flexiv::rdk::kCartDoF> target_wrench;
+            for (std::size_t i = 0; i < kCartDoF; i++) {
+                target_wrench[i] = hw_cmd_cart_wrench_[i];
+            }
+
+            // RT path: stream pose + wrench every cycle
+            robot_->StreamCartesianMotionForce(target_pose, target_wrench);
+
+            // ── Dirty-flag path: blocking calls only when config changes ──
+            check_cartesian_dirty_flags();
+
+            if (cart_stiffness_dirty_) {
+                // Clamp stiffness to [0, K_x_nom] as required by Flexiv
+                std::array<double, flexiv::rdk::kCartDoF> K_x;
+                std::array<double, flexiv::rdk::kCartDoF> Z_x;
+                for (std::size_t i = 0; i < kCartDoF; i++) {
+                    double k_max = hw_state_cart_K_x_nom_[i];
+                    double k_cmd = hw_cmd_cart_stiffness_[i];
+                    if (k_cmd > k_max) {
+                        static rclcpp::Clock steady_clock(RCL_STEADY_TIME);
+                        RCLCPP_WARN_THROTTLE(getLogger(), steady_clock, 2000,
+                            "Cartesian stiffness axis %zu: %.1f clamped to K_x_nom %.1f",
+                            i, k_cmd, k_max);
+                        k_cmd = k_max;
+                    }
+                    if (k_cmd < 0.0) k_cmd = 0.0;
+                    K_x[i] = k_cmd;
+
+                    // Clamp damping ratio to [0.3, 0.8]
+                    double z_cmd = hw_cmd_cart_damping_ratio_[i];
+                    Z_x[i] = std::clamp(z_cmd, 0.3, 0.8);
+                }
+
+                try {
+                    robot_->SetCartesianImpedance(K_x, Z_x);
+                    RCLCPP_INFO(getLogger(),
+                        "SetCartesianImpedance: K=[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f] "
+                        "Z=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+                        K_x[0], K_x[1], K_x[2], K_x[3], K_x[4], K_x[5],
+                        Z_x[0], Z_x[1], Z_x[2], Z_x[3], Z_x[4], Z_x[5]);
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(getLogger(), "SetCartesianImpedance failed: %s", e.what());
+                }
+
+                prev_cart_stiffness_ = hw_cmd_cart_stiffness_;
+                prev_cart_damping_ratio_ = hw_cmd_cart_damping_ratio_;
+            }
+
+            if (cart_max_wrench_dirty_) {
+                std::array<double, flexiv::rdk::kCartDoF> max_wrench;
+                for (std::size_t i = 0; i < kCartDoF; i++) {
+                    max_wrench[i] = hw_cmd_cart_max_wrench_[i];
+                    if (max_wrench[i] < 0.0) {
+                        max_wrench[i] = std::numeric_limits<double>::infinity();
+                    }
+                }
+
+                try {
+                    robot_->SetMaxContactWrench(max_wrench);
+                    RCLCPP_INFO(getLogger(),
+                        "SetMaxContactWrench: [%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]",
+                        max_wrench[0], max_wrench[1], max_wrench[2],
+                        max_wrench[3], max_wrench[4], max_wrench[5]);
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(getLogger(), "SetMaxContactWrench failed: %s", e.what());
+                }
+
+                prev_cart_max_wrench_ = hw_cmd_cart_max_wrench_;
+            }
+
+            if (cart_force_ctrl_axis_dirty_) {
+                std::array<bool, flexiv::rdk::kCartDoF> enabled;
+                for (std::size_t i = 0; i < kCartDoF; i++) {
+                    enabled[i] = hw_cmd_cart_force_ctrl_axis_[i] > 0.5;
+                }
+
+                try {
+                    robot_->SetForceControlAxis(enabled);
+                    RCLCPP_INFO(getLogger(),
+                        "SetForceControlAxis: [%d,%d,%d,%d,%d,%d]",
+                        enabled[0], enabled[1], enabled[2],
+                        enabled[3], enabled[4], enabled[5]);
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(getLogger(), "SetForceControlAxis failed: %s", e.what());
+                }
+
+                prev_cart_force_ctrl_axis_ = hw_cmd_cart_force_ctrl_axis_;
+            }
+
+            if (cart_nullspace_dirty_) {
+                std::vector<double> ref_q(kJointDoF);
+                for (std::size_t i = 0; i < kJointDoF; i++) {
+                    ref_q[i] = hw_cmd_cart_nullspace_q_[i];
+                }
+
+                try {
+                    robot_->SetNullSpacePosture(ref_q);
+                    RCLCPP_INFO(getLogger(),
+                        "SetNullSpacePosture: [%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]",
+                        ref_q[0], ref_q[1], ref_q[2], ref_q[3],
+                        ref_q[4], ref_q[5], ref_q[6]);
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(getLogger(), "SetNullSpacePosture failed: %s", e.what());
+                }
+
+                prev_cart_nullspace_q_ = hw_cmd_cart_nullspace_q_;
+            }
+        }
+    }
+
+    // ── Digital output (runs regardless of control mode) ────────────
     std::map<unsigned int, bool> digital_outputs;
     for (size_t i = 0; i < hw_commands_gpio_out_.size(); i++) {
         if (hw_commands_gpio_out_[i] != hw_commands_gpio_out_[i]) {
@@ -403,49 +755,117 @@ hardware_interface::return_type FlexivHardwareInterface::prepare_command_mode_sw
     start_modes_.clear();
     stop_modes_.clear();
 
-    // Starting interfaces
+    // Check if any Cartesian (tcp/*) interfaces are being started
+    bool starting_cartesian = false;
     for (const auto& key : start_interfaces) {
-        for (std::size_t i = 0; i < info_.joints.size(); i++) {
-            if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) {
-                start_modes_.push_back(hardware_interface::HW_IF_POSITION);
-            }
-            if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) {
-                start_modes_.push_back(hardware_interface::HW_IF_VELOCITY);
-            }
-            if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
-                start_modes_.push_back(hardware_interface::HW_IF_EFFORT);
-            }
+        if (key.find(kCartPrefix + "/") == 0) {
+            starting_cartesian = true;
+            break;
         }
-    }
-    // All joints must be given new command mode at the same time
-    if (start_modes_.size() != 0 && start_modes_.size() != info_.joints.size()) {
-        return hardware_interface::return_type::ERROR;
-    }
-    // All joints must have the same command mode
-    if (start_modes_.size() != 0
-        && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin())) {
-        return hardware_interface::return_type::ERROR;
     }
 
-    // Stop motion on all relevant joints that are stopping
+    // Check if any Cartesian interfaces are being stopped
+    bool stopping_cartesian = false;
     for (const auto& key : stop_interfaces) {
-        for (std::size_t i = 0; i < info_.joints.size(); i++) {
-            if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) {
-                stop_modes_.push_back(StoppingInterface::STOP_POSITION);
-            }
-            if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) {
-                stop_modes_.push_back(StoppingInterface::STOP_VELOCITY);
-            }
-            if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
-                stop_modes_.push_back(StoppingInterface::STOP_EFFORT);
-            }
+        if (key.find(kCartPrefix + "/") == 0) {
+            stopping_cartesian = true;
+            break;
         }
     }
-    // stop all interfaces at the same time
-    if (stop_modes_.size() != 0
-        && (stop_modes_.size() != info_.joints.size()
-            || !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin()))) {
-        return hardware_interface::return_type::ERROR;
+
+    // If starting Cartesian mode, treat this as a Cartesian-only switch.
+    // The FlexivCartesianController also claims joint effort+position
+    // interfaces as an exclusion lock (so no other controller can activate
+    // at the same time), but the actual RDK mode is RT_CARTESIAN_MOTION_FORCE.
+    // Joint interfaces in the start list are ignored when tcp/* is present.
+    if (starting_cartesian) {
+        start_modes_.push_back("cartesian");
+    }
+
+    if (stopping_cartesian) {
+        stop_modes_.push_back(StoppingInterface::STOP_CARTESIAN);
+    }
+
+    // Starting joint interfaces.
+    // Controllers may claim multiple interface types for mutual exclusion
+    // (e.g. CartesianController claims effort+position so that position-based
+    // controllers can't run simultaneously). We determine the primary mode
+    // by counting which type has the most claims — the primary mode is the
+    // one that covers all joints, the rest are exclusion locks.
+    if (!starting_cartesian) {
+        size_t n_pos = 0, n_vel = 0, n_eff = 0;
+        for (const auto& key : start_interfaces) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++) {
+                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) {
+                    n_pos++;
+                }
+                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) {
+                    n_vel++;
+                }
+                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
+                    n_eff++;
+                }
+            }
+        }
+
+        // Determine primary mode: the interface type that has all joints claimed.
+        // When a controller claims multiple types (e.g. effort+position), we pick
+        // effort > position > velocity as the primary mode to use with the RDK,
+        // since effort-based controllers need RT_JOINT_TORQUE while position-based
+        // need NRT_JOINT_POSITION/IMPEDANCE.
+        std::string primary_mode;
+        if (n_eff == info_.joints.size()) {
+            primary_mode = hardware_interface::HW_IF_EFFORT;
+        } else if (n_pos == info_.joints.size()) {
+            primary_mode = hardware_interface::HW_IF_POSITION;
+        } else if (n_vel == info_.joints.size()) {
+            primary_mode = hardware_interface::HW_IF_VELOCITY;
+        }
+
+        if (!primary_mode.empty()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++) {
+                start_modes_.push_back(primary_mode);
+            }
+        } else if (n_pos > 0 || n_vel > 0 || n_eff > 0) {
+            // Some joints have interfaces but no single type covers all joints
+            RCLCPP_ERROR(getLogger(),
+                "Not all joints have the same command interface type "
+                "(pos=%zu, vel=%zu, eff=%zu, expected %zu)",
+                n_pos, n_vel, n_eff, info_.joints.size());
+            return hardware_interface::return_type::ERROR;
+        }
+    }
+
+    // Stop motion on all relevant joints that are stopping.
+    // Same logic as start: determine primary mode from the stop list,
+    // ignoring exclusion-lock interfaces.
+    if (!stopping_cartesian) {
+        size_t n_pos = 0, n_vel = 0, n_eff = 0;
+        for (const auto& key : stop_interfaces) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++) {
+                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) {
+                    n_pos++;
+                }
+                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) {
+                    n_vel++;
+                }
+                if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT) {
+                    n_eff++;
+                }
+            }
+        }
+
+        // Determine which mode to stop (effort > position > velocity)
+        if (n_eff == info_.joints.size()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++)
+                stop_modes_.push_back(StoppingInterface::STOP_EFFORT);
+        } else if (n_pos == info_.joints.size()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++)
+                stop_modes_.push_back(StoppingInterface::STOP_POSITION);
+        } else if (n_vel == info_.joints.size()) {
+            for (std::size_t i = 0; i < info_.joints.size(); i++)
+                stop_modes_.push_back(StoppingInterface::STOP_VELOCITY);
+        }
     }
 
     controllers_initialized_ = true;
@@ -458,14 +878,23 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
 {
     bool starting_new_mode = (start_modes_.size() != 0);
 
-    // Mark the old mode as stopped. Only call robot_->Stop() if we
-    // are NOT immediately switching to another mode. SwitchMode()
-    // auto-stops internally ("If the robot is still moving when this
-    // function is called, it will automatically stop before making
-    // the mode transition" — Flexiv RDK docs). Calling Stop() first
-    // adds an extra blocking wait that starves the RT command stream
-    // and triggers timeliness warnings.
-    if (stop_modes_.size() != 0
+    // ── Handle stopping ─────────────────────────────────────────────
+
+    // Check if stopping Cartesian
+    bool stopping_cartesian = false;
+    for (const auto& m : stop_modes_) {
+        if (m == StoppingInterface::STOP_CARTESIAN) {
+            stopping_cartesian = true;
+            break;
+        }
+    }
+
+    if (stopping_cartesian) {
+        cartesian_controller_running_ = false;
+        if (!starting_new_mode) {
+            robot_->Stop();
+        }
+    } else if (stop_modes_.size() != 0
         && std::find(stop_modes_.begin(), stop_modes_.end(), StoppingInterface::STOP_POSITION)
                != stop_modes_.end()) {
         position_controller_running_ = false;
@@ -489,11 +918,67 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
         }
     }
 
-    if (start_modes_.size() != 0
+    // ── Handle starting ─────────────────────────────────────────────
+
+    // Check if starting Cartesian mode
+    bool starting_cartesian = false;
+    for (const auto& m : start_modes_) {
+        if (m == "cartesian") {
+            starting_cartesian = true;
+            break;
+        }
+    }
+
+    if (starting_cartesian) {
+        position_controller_running_ = false;
+        velocity_controller_running_ = false;
+        torque_controller_running_ = false;
+
+        // Initialize Cartesian commands to NaN (hold-at-current until controller writes)
+        hw_cmd_cart_pose_.fill(std::numeric_limits<double>::quiet_NaN());
+        hw_cmd_cart_wrench_.fill(0.0);
+        hw_cmd_cart_force_ctrl_axis_.fill(0.0);
+
+        // Reset dirty flag tracking so initial config is applied
+        prev_cart_stiffness_.fill(std::numeric_limits<double>::quiet_NaN());
+        prev_cart_damping_ratio_.fill(std::numeric_limits<double>::quiet_NaN());
+        prev_cart_max_wrench_.fill(std::numeric_limits<double>::quiet_NaN());
+        prev_cart_force_ctrl_axis_.fill(std::numeric_limits<double>::quiet_NaN());
+        prev_cart_nullspace_q_.assign(kJointDoF, std::numeric_limits<double>::quiet_NaN());
+
+        // Switch to RT Cartesian motion-force mode
+        RCLCPP_INFO(getLogger(), "Switching to RT_CARTESIAN_MOTION_FORCE mode");
+        robot_->SwitchMode(flexiv::rdk::Mode::RT_CARTESIAN_MOTION_FORCE);
+
+        // Configure initial settings (non-RT context — blocking is fine here)
+        // All axes motion-controlled (Phase 1)
+        robot_->SetForceControlAxis(
+            std::array<bool, flexiv::rdk::kCartDoF>{false, false, false, false, false, false});
+
+        // Force control reference frame = TCP so that force-controlled
+        // axes and target wrench follow the tool as it reorients. The
+        // ROS-side ForceControlCommand now specifies wrench + axis selection
+        // in the TCP frame as well, which is the natural choice for tasks
+        // like "push along the tool normal while aligning to a surface"
+        // (DIMM pickup, polishing, etc.). With TCP frame, the firmware's
+        // internal force loop tracks wrench in the tool's current axes each
+        // cycle, so rotating the end-effector automatically rotates the
+        // commanded force direction without any client-side transform.
+        //
+        // SetForceControlFrame is a blocking call, so it should only be
+        // changed on activation or via the dirty-flag path, not per-cycle.
+        robot_->SetForceControlFrame(flexiv::rdk::CoordType::TCP);
+
+        RCLCPP_INFO(getLogger(), "RT_CARTESIAN_MOTION_FORCE mode active (force frame = TCP)");
+
+        cartesian_controller_running_ = true;
+
+    } else if (start_modes_.size() != 0
         && std::find(start_modes_.begin(), start_modes_.end(), hardware_interface::HW_IF_POSITION)
                != start_modes_.end()) {
         velocity_controller_running_ = false;
         torque_controller_running_ = false;
+        cartesian_controller_running_ = false;
 
         // Hold joints before user commands arrives
         std::fill(hw_commands_joint_positions_.begin(), hw_commands_joint_positions_.end(),
@@ -509,6 +994,7 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
                       != start_modes_.end()) {
         position_controller_running_ = false;
         torque_controller_running_ = false;
+        cartesian_controller_running_ = false;
 
         // Hold joints before user commands arrives
         std::fill(hw_commands_joint_velocities_.begin(), hw_commands_joint_velocities_.end(),
@@ -524,6 +1010,7 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
                       != start_modes_.end()) {
         position_controller_running_ = false;
         velocity_controller_running_ = false;
+        cartesian_controller_running_ = false;
 
         // Hold joints when starting joint torque controller before user
         // commands arrives
@@ -540,6 +1027,130 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
     stop_modes_.clear();
 
     return hardware_interface::return_type::OK;
+}
+
+void FlexivHardwareInterface::run_tare_sequence()
+{
+    tare_in_progress_.store(true, std::memory_order_release);
+
+    try {
+        RCLCPP_INFO(getLogger(), "[Tare] Stopping current mode for F/T sensor zeroing...");
+        robot_->Stop();
+
+        RCLCPP_INFO(getLogger(), "[Tare] Switching to NRT_PRIMITIVE_EXECUTION...");
+        robot_->SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
+
+        RCLCPP_INFO(getLogger(), "[Tare] Executing ZeroFTSensor (robot must not be in contact)...");
+        robot_->ExecutePrimitive(
+            "ZeroFTSensor", std::map<std::string, flexiv::rdk::FlexivDataTypes>{});
+
+        // Wait for the primitive to finish
+        while (!std::get<int>(robot_->primitive_states()["terminated"])) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        RCLCPP_INFO(getLogger(), "[Tare] ZeroFTSensor complete");
+
+        // Restore the previous control mode
+        if (cartesian_controller_running_) {
+            restore_cartesian_mode();
+        } else if (position_controller_running_ || velocity_controller_running_) {
+            RCLCPP_INFO(getLogger(), "[Tare] Restoring joint position/impedance mode...");
+            robot_->SwitchMode(rdk_control_mode_);
+        } else if (torque_controller_running_) {
+            RCLCPP_INFO(getLogger(), "[Tare] Restoring RT_JOINT_TORQUE mode...");
+            robot_->SwitchMode(flexiv::rdk::Mode::RT_JOINT_TORQUE);
+        } else {
+            RCLCPP_INFO(getLogger(), "[Tare] No active controller; robot remains in idle.");
+        }
+
+        RCLCPP_INFO(getLogger(), "[Tare] F/T sensor tare completed successfully");
+
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(getLogger(), "[Tare] Failed: %s", e.what());
+    }
+
+    tare_in_progress_.store(false, std::memory_order_release);
+}
+
+void FlexivHardwareInterface::restore_cartesian_mode()
+{
+    RCLCPP_INFO(getLogger(), "[Tare] Restoring RT_CARTESIAN_MOTION_FORCE mode...");
+    robot_->SwitchMode(flexiv::rdk::Mode::RT_CARTESIAN_MOTION_FORCE);
+
+    // Seed the command pose from the current TCP so that write() streams
+    // a pose matching reality while the controller is still waking up.
+    // Without this, the stale pre-tare pose gets streamed during the gap
+    // between tare_in_progress_=false and the controller's first update().
+    const auto& tcp = robot_->states().tcp_pose;
+    for (std::size_t i = 0; i < kPoseSize; i++) {
+        hw_cmd_cart_pose_[i] = tcp[i];
+    }
+    RCLCPP_INFO(getLogger(),
+        "[Tare] Seeded command pose from TCP: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+        tcp[0], tcp[1], tcp[2], tcp[3], tcp[4], tcp[5], tcp[6]);
+
+    // Re-apply Cartesian configuration that was set before the tare.
+    // Force control axis
+    std::array<bool, flexiv::rdk::kCartDoF> force_axes;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        force_axes[i] = hw_cmd_cart_force_ctrl_axis_[i] > 0.5;
+    }
+    robot_->SetForceControlAxis(force_axes);
+
+    // Force control reference frame = TCP (must match mode entry above)
+    robot_->SetForceControlFrame(flexiv::rdk::CoordType::TCP);
+
+    // Stiffness and damping (if previously set)
+    bool has_stiffness = true;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (std::isnan(prev_cart_stiffness_[i])) {
+            has_stiffness = false;
+            break;
+        }
+    }
+    if (has_stiffness) {
+        std::array<double, flexiv::rdk::kCartDoF> K_x;
+        std::array<double, flexiv::rdk::kCartDoF> Z_x;
+        for (std::size_t i = 0; i < kCartDoF; i++) {
+            K_x[i] = std::clamp(prev_cart_stiffness_[i], 0.0, hw_state_cart_K_x_nom_[i]);
+            Z_x[i] = std::clamp(prev_cart_damping_ratio_[i], 0.3, 0.8);
+        }
+        robot_->SetCartesianImpedance(K_x, Z_x);
+    }
+
+    // Max wrench (if previously set)
+    bool has_max_wrench = true;
+    for (std::size_t i = 0; i < kCartDoF; i++) {
+        if (std::isnan(prev_cart_max_wrench_[i])) {
+            has_max_wrench = false;
+            break;
+        }
+    }
+    if (has_max_wrench) {
+        std::array<double, flexiv::rdk::kCartDoF> max_wrench;
+        for (std::size_t i = 0; i < kCartDoF; i++) {
+            max_wrench[i] = prev_cart_max_wrench_[i];
+            if (max_wrench[i] < 0.0) {
+                max_wrench[i] = std::numeric_limits<double>::infinity();
+            }
+        }
+        robot_->SetMaxContactWrench(max_wrench);
+    }
+
+    // Nullspace posture (if previously set)
+    bool has_nullspace = true;
+    for (std::size_t i = 0; i < kJointDoF; i++) {
+        if (std::isnan(prev_cart_nullspace_q_[i])) {
+            has_nullspace = false;
+            break;
+        }
+    }
+    if (has_nullspace) {
+        std::vector<double> ref_q(prev_cart_nullspace_q_.begin(), prev_cart_nullspace_q_.end());
+        robot_->SetNullSpacePosture(ref_q);
+    }
+
+    RCLCPP_INFO(getLogger(), "[Tare] RT_CARTESIAN_MOTION_FORCE mode restored");
 }
 
 } /* namespace flexiv_hardware */
